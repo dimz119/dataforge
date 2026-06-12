@@ -1,0 +1,7 @@
+openapi: 3.0.3
+info:
+  title: DataForge API
+  version: v1
+  description: Synthetic data streams for data-engineering education.
+paths: {}
+components: {}

@@ -1,0 +1,121 @@
+[project]
+name = "dataforge-backend"
+version = "0.1.0"
+description = "DataForge backend: Django control plane, framework-free engine, data-plane runner."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "django>=5.1,<6.0",
+    "djangorestframework>=3.15",
+    "drf-spectacular>=0.28",
+    "celery[redis]>=5.4",
+    "redis>=5.0",
+    "psycopg[binary]>=3.2",
+    "confluent-kafka>=2.5",
+    "aiohttp>=3.10",
+    "structlog>=24.4",
+    "django-environ>=0.11",
+    "django-cors-headers>=4.4",
+    "gunicorn>=23.0",
+    "uvicorn[standard]>=0.30",
+    "whitenoise>=6.7",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.9",
+    "mypy>=1.13",
+    "django-stubs[compatible-mypy]>=5.1",
+    "djangorestframework-stubs[compatible-mypy]>=3.15",
+    "celery-types>=0.22",
+    "import-linter>=2.1",
+    "pytest>=8.3",
+    "pytest-django>=4.9",
+]
+
+[tool.uv]
+package = false
+
+# --- ruff ---------------------------------------------------------------------
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "DTZ", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+# Django-generated migrations: long lines and mutable class attributes are the
+# generator's house style.
+"*/migrations/*" = ["E501", "RUF012"]
+
+# --- mypy (strict per project-folder-structure §2) ------------------------------
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["mypy_django_plugin.main"]
+exclude = ['(^|/)\.venv/']
+
+[[tool.mypy.overrides]]
+module = "*.migrations.*"
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = ["confluent_kafka", "confluent_kafka.*", "environ", "environ.*"]
+ignore_missing_imports = true
+
+[tool.django-stubs]
+django_settings_module = "config.settings.test"
+
+# --- pytest ---------------------------------------------------------------------
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "config.settings.test"
+python_files = ["test_*.py"]
+addopts = "--strict-markers"
+
+# --- import-linter contracts (backend-architecture §3.2; CI-blocking) ------------
+
+[tool.importlinter]
+# Required by import-linter for contract 2's external forbidden modules
+# (django, celery, redis, …).
+include_external_packages = true
+root_packages = [
+  "identity", "tenancy", "catalog", "registry", "streams",
+  "generation", "chaos", "delivery", "observation", "audit",
+  "dataforge_engine", "runner", "config",
+]
+
+# 1. Layering inside every app: api/tasks → application → infra → domain
+[[tool.importlinter.contracts]]
+name = "App layering"
+type = "layers"
+containers = [
+  "identity", "tenancy", "catalog", "registry", "streams",
+  "generation", "chaos", "delivery", "observation", "audit",
+]
+layers = ["api : tasks", "application", "infra", "domain"]
+exhaustive = false   # migrations/, apps.py sit outside the contract
+
+# 2. The engine is framework-free (§4.3)
+[[tool.importlinter.contracts]]
+name = "dataforge_engine purity"
+type = "forbidden"
+source_modules = ["dataforge_engine"]
+forbidden_modules = [
+  "django", "rest_framework", "celery", "channels", "redis",
+  "confluent_kafka", "psycopg",
+  "identity", "tenancy", "catalog", "registry", "streams",
+  "generation", "chaos", "delivery", "observation", "audit",
+  "config", "runner",
+]
+
+# 3. Cross-app access only through application/ and domain/
+#    (one generated contract per app pair; generator script in infra/ci/)
+[[tool.importlinter.contracts]]
+name = "No cross-app infra/api imports (streams example)"
+type = "forbidden"
+source_modules = ["identity", "tenancy", "catalog", "registry",
+  "generation", "chaos", "delivery", "observation", "audit"]
+forbidden_modules = ["streams.infra", "streams.api"]
