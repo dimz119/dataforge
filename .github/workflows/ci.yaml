@@ -1,0 +1,118 @@
+# DataForge CI — ONE path-filtered pipeline (ADR-0001; deployment-architecture §7).
+# Backend paths trigger the backend job, frontend paths the frontend job,
+# either side triggers the OpenAPI contract-artifact job (ADR-0014 lockstep);
+# folder-lint runs on every PR (Phase 1 exit criterion 5).
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  changes:
+    name: Detect changed paths
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            backend:
+              - 'backend/**'
+              - '.github/workflows/ci.yaml'
+            frontend:
+              - 'frontend/**'
+              - '.github/workflows/ci.yaml'
+
+  backend:
+    name: backend
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - name: Sync dependencies
+        run: uv sync
+      - name: Lint (ruff)
+        run: uv run ruff check .
+      - name: Type-check (mypy)
+        run: uv run mypy .
+      - name: Import-boundary contracts (import-linter, backend-architecture §3.2)
+        run: uv run lint-imports
+      # Phase 1 tests are service-free; compose-backed Postgres/Redis/Kafka
+      # services join this job in Phase 2 (testing-strategy §2 UNIT lane).
+      - name: Tests (pytest)
+        run: uv run pytest
+
+  frontend:
+    name: frontend
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Lint (eslint)
+        run: npm run lint
+      - name: Type-check (tsc)
+        run: npx tsc --noEmit
+      - name: Tests (vitest)
+        run: npm test -- --run
+
+  openapi-artifact:
+    name: openapi-artifact
+    needs: changes
+    # Contract jobs run when either side changes (ADR-0001).
+    if: needs.changes.outputs.backend == 'true' || needs.changes.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      DJANGO_SETTINGS_MODULE: config.settings.test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - name: Sync dependencies
+        run: uv sync
+      - name: Regenerate OpenAPI schema (drf-spectacular)
+        run: uv run python manage.py spectacular --file schema/openapi.yaml
+      - name: Fail on uncommitted schema drift (ADR-0014 lockstep)
+        run: git diff --exit-code -- schema/openapi.yaml
+
+  folder-lint:
+    name: folder-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tree matches D19 (project-folder-structure.md)
+        run: python3 infra/scripts/folder_lint.py

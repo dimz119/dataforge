@@ -1,0 +1,19 @@
+# DataForge gitleaks configuration (SEC-DEP-5, security-architecture §12).
+# Wired via .pre-commit-config.yaml (--config infra/ci/gitleaks.toml); the CI
+# gitleaks job uses the same file so pre-commit and CI agree.
+
+title = "DataForge gitleaks"
+
+[extend]
+# Keep the full upstream default ruleset; the rule below is additive.
+useDefault = true
+
+# SEC-KEY-1: the df_ API-key prefix is registered with secret-scanning tooling
+# so leaked keys are machine-detectable. Key shape per security-architecture
+# §3.2.1: df_<env>_<8-char prefix>_<secret>, env token ∈ {live, stg, dev},
+# e.g. df_live_k3x9w2ab_Tr8KpVn4mQz7LcYd2Fh6Bj0RwSx1GeNu.
+[[rules]]
+id = "dataforge-api-key"
+description = "DataForge API key (SEC-KEY-1)"
+regex = '''df_(live|stg|dev)_[a-z0-9]{8}_[A-Za-z0-9]{16,}'''
+keywords = ["df_live_", "df_stg_", "df_dev_"]

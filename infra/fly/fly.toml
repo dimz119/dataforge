@@ -1,0 +1,55 @@
+# DataForge — Fly.io app config (deployment-architecture.md §3, ADR-0015).
+#
+# Phase 1 throwaway deploy: the `web` process group ONLY, serving /healthz —
+# proves registry auth, secrets handling, and the deploy pipeline end to end
+# (phase-01-foundations.md).
+#
+# Phase 11 replaces this: full process-group topology (ws/worker/runner per
+# §3.2), the release_command (`migrate --noinput && provision_kafka_topics`,
+# §7.3), the /readyz health check on web, machine count 2, and the companion
+# fly.kafka.toml for the internal-only broker app (§3.4).
+#
+# Secrets (DJANGO_SECRET_KEY, DATABASE_URL, ...) come from `fly secrets set`
+# only — never from this file (secrets rule S-2). [env] is non-secret config.
+
+app = "dataforge"
+primary_region = "iad"
+
+[build]
+  # Built from backend/Dockerfile with the repo's backend/ as build context;
+  # see infra/fly/README.md for the exact deploy command.
+  dockerfile = "Dockerfile"
+  build-target = "prod"
+
+[processes]
+  web = "gunicorn config.wsgi:application -b [::]:8000 -w 4 --timeout 60"
+
+[deploy]
+  strategy = "rolling"
+
+[env]
+  DF_ENV = "prod"
+  DJANGO_SETTINGS_MODULE = "config.settings.prod"
+  ALLOWED_HOSTS = "dataforge.fly.dev"
+
+[http_service]
+  processes = ["web"]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  # Phase 11 replaces this with GET /readyz per §3.2 (the throwaway app has no
+  # Postgres/Redis to gate on; /healthz is liveness-only per observability §6).
+  [[http_service.checks]]
+    interval = "10s"
+    timeout = "5s"
+    grace_period = "15s"
+    method = "GET"
+    path = "/healthz"
+
+[[vm]]
+  processes = ["web"]
+  size = "shared-cpu-2x"
+  memory = "2048mb"

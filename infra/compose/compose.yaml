@@ -1,0 +1,265 @@
+# DataForge development stack — deployment-architecture.md §2 (D13).
+# Nine platform services (postgres, redis, kafka, api, ws, worker, runner,
+# buffer-writer, web) + the dev-only mailpit container (§2.1; mailpit is
+# exempt from the nine-service production-parity count).
+#
+# Usage (from the repo root):
+#   cp infra/compose/.env.example infra/compose/.env
+#   docker compose -f infra/compose/compose.yaml up -d --wait
+#
+# Named volumes persist across restarts; `docker compose down -v` is the
+# documented full reset (§2.1).
+
+name: dataforge
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-dataforge}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dataforge}
+      POSTGRES_DB: ${POSTGRES_DB:-dataforge}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dataforge -d dataforge"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 3s
+
+  kafka:
+    image: apache/kafka:3.7.0
+    # Single-node KRaft combined broker+controller (§2.2). BROKER://kafka:9092
+    # is the only listener application services use; HOST://localhost:19092 is
+    # dev tooling only (kcat, kafka-console-consumer) — no production
+    # counterpart (principle D-4).
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: BROKER://:9092,CONTROLLER://:9093,HOST://:19092
+      KAFKA_ADVERTISED_LISTENERS: BROKER://kafka:9092,HOST://localhost:19092
+      KAFKA_INTER_BROKER_LISTENER_NAME: BROKER
+      # Mechanically required by apache/kafka:3.7.0: providing any KAFKA_* env
+      # var discards the image's default server.properties, so the KRaft
+      # controller role needs controller.listener.names set explicitly.
+      # Additive to the §2.2 block; does not alter its semantics.
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: BROKER:PLAINTEXT,CONTROLLER:PLAINTEXT,HOST:PLAINTEXT
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      CLUSTER_ID: ${KAFKA_CLUSTER_ID} # fixed constant in .env so re-up never reformats
+    ports:
+      - "19092:19092" # host tooling listener only
+    volumes:
+      - kafkadata:/var/lib/kafka/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  api:
+    build:
+      context: ../../backend
+      target: dev
+    # Dev-only entrypoint (§2.1 api row): migrate + provision_kafka_topics
+    # before the runserver command. Prod runs both in the Fly release command
+    # instead (§7.3).
+    entrypoint:
+      [
+        "bash",
+        "-c",
+        'python manage.py migrate --noinput && python manage.py provision_kafka_topics && exec "$$@"',
+        "--",
+      ]
+    command: python manage.py runserver 0.0.0.0:8000
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - ../../backend:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS localhost:8000/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  ws:
+    build:
+      context: ../../backend
+      target: dev
+    command: uvicorn config.asgi:application --host 0.0.0.0 --port 8001 --reload
+    env_file:
+      - .env
+    ports:
+      - "8001:8001"
+    volumes:
+      - ../../backend:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS localhost:8001/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  worker:
+    build:
+      context: ../../backend
+      target: dev
+    # Queues per backend-architecture §7.1; beat embedded (-B) in dev only.
+    command: celery -A config worker -B -Q control,lifecycle,validation,exports,maintenance -c 2
+    env_file:
+      - .env
+    volumes:
+      - ../../backend:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A config inspect ping -d celery@$$HOSTNAME"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  runner:
+    build:
+      context: ../../backend
+      target: dev
+    # Phase 1 stub: heartbeats + aiohttp health listener on :8081 only
+    # (backend-architecture §8.1). Real shard-runner logic lands in Phases
+    # 5-6 with this same command (principle D-1).
+    command: python -m runner --role generation
+    env_file:
+      - .env
+    ports:
+      - "8090:8081" # health, debug only
+    volumes:
+      - ../../backend:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS localhost:8081/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  buffer-writer:
+    build:
+      context: ../../backend
+      target: dev
+    # Hosts the rest_buffer buffer-writer and the ws-pusher Kafka→channel-layer
+    # sink consumers. Phase 1 stub: heartbeats + health listener only; real
+    # sink consumers land in Phases 5-6 with this same command (D-1).
+    command: python -m runner --role sinks
+    env_file:
+      - .env
+    ports:
+      - "8091:8081" # health, debug only
+    volumes:
+      - ../../backend:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS localhost:8081/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  web:
+    build:
+      context: ../../frontend
+      target: dev
+    # Vite dev server; /api → api:8000 and /ws → ws:8001 proxying lives in
+    # frontend/vite.config.ts (§2.1 web row).
+    command: npm run dev -- --host 0.0.0.0 --port 5173
+    ports:
+      - "5173:5173"
+    volumes:
+      - ../../frontend:/app
+      - /app/node_modules # anonymous volume over node_modules (§2.1)
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS localhost:5173/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  mailpit:
+    # Dev-only tooling (§2.1): captures EMAIL_URL SMTP sends; UI + REST API on
+    # 8025, SMTP on 1025 internal-only. No production counterpart (§5 uses
+    # Postmark in staging/prod). Exempt from the nine-service parity count.
+    image: axllent/mailpit
+    ports:
+      - "8025:8025" # UI + /api/v1/messages
+    healthcheck:
+      # `mailpit readyz` per §2.1; the binary lives at /mailpit (not on PATH)
+      # inside the axllent/mailpit image.
+      test: ["CMD-SHELL", "/mailpit readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+volumes:
+  pgdata:
+  redisdata:
+  kafkadata:

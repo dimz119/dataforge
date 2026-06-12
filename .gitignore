@@ -1,0 +1,48 @@
+# --- Python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# --- Node / frontend ----------------------------------------------------------
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+coverage/
+
+# --- Env files & secrets (rule S-1: infra/compose/.env is the dev secret home)
+.env
+.env.*
+!.env.example
+
+# --- Docker ------------------------------------------------------------------
+# Named volumes (pgdata, redisdata, kafkadata) live in the Docker engine, not
+# the tree. Ignore any local compose overrides.
+compose.override.yaml
+docker-compose.override.yml
+
+# --- Test/build artifacts ------------------------------------------------------
+playwright-report/
+test-results/
+
+# --- Editors / OS --------------------------------------------------------------
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# --- Local agent/tooling scratch ------------------------------------------------
+.omc/
+.claude/*
+!.claude/settings.json
+
+# --- Logs -----------------------------------------------------------------------
+*.log
