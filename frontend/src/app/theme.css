@@ -1,0 +1,58 @@
+/*
+ * Design tokens for the console shell.
+ *
+ * Phase 7 replaces this file with the Tailwind v4 CSS-first @theme token set
+ * (frontend-architecture §8): color scale, spacing, radii, and font stack as
+ * @theme variables. Phase 1 ships plain CSS custom properties so the routing
+ * skeleton renders legibly without pulling Tailwind into the scaffold.
+ */
+
+:root {
+  --df-color-bg: #f9fafb;
+  --df-color-surface: #ffffff;
+  --df-color-border: #e5e7eb;
+  --df-color-text: #1f2937;
+  --df-color-text-muted: #6b7280;
+  --df-color-accent: #2563eb;
+  --df-font-sans: system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+
+body {
+  margin: 0;
+  background: var(--df-color-bg);
+  color: var(--df-color-text);
+  font-family: var(--df-font-sans);
+}
+
+.df-workspace-layout__topbar {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  padding: 0.75rem 1.25rem;
+  background: var(--df-color-surface);
+  border-bottom: 1px solid var(--df-color-border);
+}
+
+.df-workspace-layout__brand {
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.df-workspace-layout__hint,
+.df-placeholder-page__group {
+  color: var(--df-color-text-muted);
+  font-size: 0.875rem;
+}
+
+.df-workspace-layout__content,
+.df-auth-layout,
+.df-placeholder-page,
+.df-not-found-page {
+  padding: 1.5rem 1.25rem;
+}
+
+.df-placeholder-page__group {
+  margin: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}

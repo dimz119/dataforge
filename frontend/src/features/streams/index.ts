@@ -1,0 +1,1 @@
+export { streamsRoutes } from './routes';

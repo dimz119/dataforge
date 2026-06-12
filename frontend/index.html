@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DataForge console</title>
+    <style>
+      /* Boot splash — blank-shell mitigation behind the login wall (ADR-0016,
+         frontend-architecture §1.2). React replaces #root's children on mount. */
+      #df-boot-splash {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        min-height: 100vh;
+        margin: 0;
+        font-family:
+          system-ui,
+          -apple-system,
+          'Segoe UI',
+          sans-serif;
+        color: #1f2937;
+      }
+      #df-boot-splash .df-boot-mark {
+        font-size: 1.5rem;
+        font-weight: 700;
+        letter-spacing: -0.02em;
+      }
+      #df-boot-splash .df-boot-hint {
+        margin-top: 0.5rem;
+        font-size: 0.875rem;
+        color: #6b7280;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root">
+      <div id="df-boot-splash" role="status" aria-live="polite">
+        <span class="df-boot-mark">DataForge</span>
+        <span class="df-boot-hint">Loading the console…</span>
+      </div>
+    </div>
+    <script type="module" src="/src/app/main.tsx"></script>
+  </body>
+</html>

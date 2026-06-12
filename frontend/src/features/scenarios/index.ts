@@ -1,0 +1,1 @@
+export { scenariosRoutes } from './routes';
