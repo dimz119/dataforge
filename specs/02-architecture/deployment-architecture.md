@@ -35,7 +35,7 @@ One command — `docker compose up` from `infra/compose/` — brings up the full
 | `runner` | `backend`, target `dev` | `python -m runner --role generation` (Phase 1: stub that heartbeats and serves health) | `8090 → 8081` (health, debug only) | bind mount | postgres, redis, kafka | `curl -fsS localhost:8081/healthz` · 10s/5s/5/15s |
 | `buffer-writer` | `backend`, target `dev` | `python -m runner --role sinks` — hosts the `rest_buffer` buffer-writer and the ws-pusher Kafka→channel-layer sink consumers (Phase 1: stub) | `8091 → 8081` (health, debug only) | bind mount | postgres, redis, kafka | `curl -fsS localhost:8081/healthz` · 10s/5s/5/15s |
 | `web` | `frontend` image, target `dev` | Vite dev server `--host 0.0.0.0 --port 5173`, proxying `/api → api:8000`, `/ws → ws:8001` | `5173 → 5173` | bind mount `../../frontend:/app` (anonymous volume over `node_modules`) | api | `curl -fsS localhost:5173/` · 10s/5s/5/20s |
-| `mailpit` | `axllent/mailpit` | default (SMTP capture + web UI/REST API) | `8025 → 8025` (UI + `/api/v1/messages`); SMTP `1025` internal-only | — | — | `mailpit readyz` · 10s/5s/5/5s |
+| `mailpit` | `axllent/mailpit` | default (SMTP capture + web UI/REST API) | `8025 → 8025` (UI + `/api/v1/messages`); SMTP `1025` internal-only | — | — | `/mailpit readyz` (absolute path — the binary is not on PATH in the image) · 10s/5s/5/5s |
 
 The runner-family containers run the single data-plane entrypoint `python -m runner [--role generation|sinks|all]` ([backend-architecture.md](backend-architecture.md) §8.1) and expose its internal health listener `:8081` under distinct host ports (`8090`/`8091`) so both are curl-able from the host. `mailpit` is **dev-only tooling** — it captures the verification/reset emails that `EMAIL_URL` (§2.3) sends over SMTP and has no production counterpart (staging/prod use Postmark, §5). The "nine services" production-parity statements (D-1, Phase 1 exit criteria) count the nine platform services above it; mailpit is a tenth container in the file, exempt from the parity claim.
 
@@ -47,6 +47,7 @@ Named volumes: `pgdata`, `redisdata`, `kafkadata`. `docker compose down -v` is t
 environment:
   KAFKA_NODE_ID: 1
   KAFKA_PROCESS_ROLES: broker,controller
+  KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER   # required: apache/kafka discards default server.properties when any KAFKA_* env is set
   KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
   KAFKA_LISTENERS: BROKER://:9092,CONTROLLER://:9093,HOST://:19092
   KAFKA_ADVERTISED_LISTENERS: BROKER://kafka:9092,HOST://localhost:19092
