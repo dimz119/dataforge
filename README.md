@@ -70,3 +70,5 @@ artifact drift gate (ADR-0014). Deployment: see
 ## License
 
 [MIT](LICENSE)
+
+<!-- CI pipeline verification: trivial no-op change to prove the four CI jobs go green (phase-01 exit criterion 3). -->

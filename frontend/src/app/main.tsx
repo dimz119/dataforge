@@ -18,3 +18,5 @@ createRoot(container).render(
     </AppProviders>
   </StrictMode>,
 );
+
+// CI pipeline verification touch (phase-01 exit criterion 3); harmless no-op.

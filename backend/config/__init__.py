@@ -7,3 +7,5 @@ loads (backend-architecture §2.1).
 from config.celery import app as celery_app
 
 __all__ = ["celery_app"]
+
+# CI pipeline verification touch (phase-01 exit criterion 3); harmless no-op.
