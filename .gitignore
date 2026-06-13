@@ -46,3 +46,7 @@ test-results/
 
 # --- Logs -----------------------------------------------------------------------
 *.log
+
+# Celery beat local schedule DB (runtime artifact)
+backend/celerybeat-schedule
+backend/celerybeat-schedule.*

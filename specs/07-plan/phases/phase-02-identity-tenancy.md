@@ -74,7 +74,7 @@ Phase 2 builds the tenant boundary before anything worth stealing exists: real u
 9. Cross-tenant probe: repeat steps 2–6 as `bob@example.com` → workspace B; `curl -s -o /dev/null -w '%{http_code}' localhost:8000/api/v1/workspaces/$WS -H "Authorization: Bearer $ACCESS_BOB"` → `404`.
 10. Guard demo: `pytest backend/tests/guards/test_tenancy_guard.py -q` — plants an unscoped canary model and asserts `check_tenancy` exits non-zero naming it; corrected canaries pass.
 11. RLS demo: `pytest backend/tests/tenancy/test_rls_raw_sql.py -q` — raw psycopg under workspace-B GUC selects 0 of A's rows; unset GUC selects 0 rows.
-12. Audit: `curl -s localhost:8000/api/v1/workspaces/$WS/audit-log -H "Authorization: Bearer $ACCESS" | jq '.data[].action'` — shows `identity.user.registered`, `tenancy.workspace.created`, `tenancy.api_key.created`, `tenancy.api_key.revoked`.
+12. Audit: `curl -s localhost:8000/api/v1/workspaces/$WS/audit-log -H "Authorization: Bearer $ACCESS" | jq '.data[].action'` — shows the workspace-scoped actions `tenancy.workspace.created`, `tenancy.api_key.created`, `tenancy.api_key.revoked`. Account-level events such as `identity.user.registered` are written with a NULL `workspace_id` and are deliberately **excluded** from the per-workspace audit-log read (INV-AUD-4 / security §10.4) — visible only to the account owner via operator tooling.
 
 ## Exit criteria
 

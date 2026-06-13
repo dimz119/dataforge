@@ -23,6 +23,9 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+      # Two-role bootstrap (database-schema §11 / SEC-TEN-2): creates the runtime
+      # NOBYPASSRLS role `dataforge_app` on first init so RLS actually bites.
+      - ./initdb:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U dataforge -d dataforge"]
       interval: 5s
@@ -87,14 +90,17 @@ services:
     build:
       context: ../../backend
       target: dev
-    # Dev-only entrypoint (§2.1 api row): migrate + provision_kafka_topics
-    # before the runserver command. Prod runs both in the Fly release command
-    # instead (§7.3).
+    # Dev-only entrypoint (§2.1 api row): migrate + provision_db_roles +
+    # provision_kafka_topics before the runserver command. Prod runs these in the
+    # Fly release command instead (§7.3). migrate + provision_db_roles connect as
+    # the owner/migrate role (MIGRATE_DATABASE_URL); runserver (and every other
+    # backend service) connects as the runtime NOBYPASSRLS role via DATABASE_URL,
+    # so the Postgres RLS backstop is enforced (SEC-TEN-2 / exit criterion #2,#6).
     entrypoint:
       [
         "bash",
         "-c",
-        'python manage.py migrate --noinput && python manage.py provision_kafka_topics && exec "$$@"',
+        'python manage.py migrate --noinput && python manage.py provision_db_roles && python manage.py provision_kafka_topics && exec "$$@"',
         "--",
       ]
     command: python manage.py runserver 0.0.0.0:8000

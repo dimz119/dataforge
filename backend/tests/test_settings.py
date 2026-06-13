@@ -8,11 +8,14 @@ from django.core.exceptions import ImproperlyConfigured
 
 _PROD_REQUIRED = {
     "DJANGO_SECRET_KEY": "prod-secret",
+    # Dedicated JWT signing key, never DJANGO_SECRET_KEY (security §3.1.2).
+    "JWT_SIGNING_KEY": "prod-jwt-signing-key",
     "DATABASE_URL": "postgres://dataforge:dataforge@postgres:5432/dataforge",
     "REDIS_URL": "redis://redis:6379/0",
     "KAFKA_BOOTSTRAP_SERVERS": "kafka:9092",
     "ALLOWED_HOSTS": "api.dataforge.dev",
     "EMAIL_URL": "smtp://mail.example.com:587",
+    "CONSOLE_BASE_URL": "https://app.dataforge.dev",
 }
 
 

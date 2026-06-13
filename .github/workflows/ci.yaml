@@ -44,6 +44,28 @@ jobs:
     defaults:
       run:
         working-directory: backend
+    # Service containers for the Phase 2 integration lane: the cross-tenant
+    # attack suite, raw-SQL RLS probes, and revocation stopwatch require a real
+    # Postgres (RLS is a Postgres construct) and Redis (revocation cache).
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: dataforge
+          POSTGRES_PASSWORD: dataforge
+          POSTGRES_DB: dataforge
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U dataforge -d dataforge"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -57,10 +79,29 @@ jobs:
         run: uv run mypy .
       - name: Import-boundary contracts (import-linter, backend-architecture §3.2)
         run: uv run lint-imports
-      # Phase 1 tests are service-free; compose-backed Postgres/Redis/Kafka
-      # services join this job in Phase 2 (testing-strategy §2 UNIT lane).
-      - name: Tests (pytest)
+      # UNIT lane: in-memory SQLite, hermetic and fast (testing-strategy §2).
+      - name: Tests (pytest, unit lane)
         run: uv run pytest
+      # INTEGRATION lane (testing-strategy §7.3): the permanent TEN attack
+      # suite, raw-SQL RLS probes, and revocation stopwatch run under Postgres
+      # (RLS-bearing, connecting as the non-owner dataforge_app role so FORCE
+      # RLS bites) + Redis — the Phase 2 isolation gates, unskippable on every PR.
+      - name: Provision app role + apply RLS migrations
+        env:
+          DJANGO_SETTINGS_MODULE: config.settings.test_postgres
+          DATABASE_URL: postgres://dataforge:dataforge@localhost:5432/dataforge
+          MIGRATE_DATABASE_URL: postgres://dataforge:dataforge@localhost:5432/dataforge
+          REDIS_URL: redis://localhost:6379/0
+        run: |
+          uv run python manage.py migrate --noinput
+          uv run python manage.py provision_db_roles --app-password dataforge_app
+      - name: Integration tests (Postgres RLS + Redis)
+        env:
+          DJANGO_SETTINGS_MODULE: config.settings.test_postgres
+          DATABASE_URL: postgres://dataforge_app:dataforge_app@localhost:5432/dataforge
+          MIGRATE_DATABASE_URL: postgres://dataforge:dataforge@localhost:5432/dataforge
+          REDIS_URL: redis://localhost:6379/0
+        run: uv run pytest tests/tenancy tests/guards tests/ops
 
   frontend:
     name: frontend
