@@ -14,11 +14,13 @@ DEBUG = False
 # --- Required-env manifest (validated at boot) --------------------------------
 _REQUIRED_ENVS = (
     "DJANGO_SECRET_KEY",
+    "JWT_SIGNING_KEY",  # dedicated JWT key, never DJANGO_SECRET_KEY (security §3.1.2)
     "DATABASE_URL",
     "REDIS_URL",
     "KAFKA_BOOTSTRAP_SERVERS",
     "ALLOWED_HOSTS",
     "EMAIL_URL",
+    "CONSOLE_BASE_URL",
 )
 _missing = [name for name in _REQUIRED_ENVS if not os.environ.get(name)]
 if _missing:

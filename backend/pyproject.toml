@@ -6,6 +6,8 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "django>=5.1,<6.0",
     "djangorestframework>=3.15",
+    "djangorestframework-simplejwt>=5.3",
+    "argon2-cffi>=23.1",
     "drf-spectacular>=0.28",
     "celery[redis]>=5.4",
     "redis>=5.0",
@@ -45,9 +47,18 @@ line-length = 100
 select = ["E", "F", "W", "I", "UP", "B", "C4", "DTZ", "RUF"]
 
 [tool.ruff.lint.per-file-ignores]
-# Django-generated migrations: long lines and mutable class attributes are the
-# generator's house style.
-"*/migrations/*" = ["E501", "RUF012"]
+# Django-generated migrations: long lines, unsorted imports, and mutable class
+# attributes are the generator's house style.
+"*/migrations/*" = ["E501", "I001", "RUF012"]
+# DRF views/serializers declare framework-recognized mutable class attributes
+# (`permission_classes`, `authentication_classes`, serializer `Meta`) by design.
+"*/api/viewsets.py" = ["RUF012"]
+"*/api/viewset_base.py" = ["RUF012"]
+"*/api/serializers.py" = ["RUF012"]
+# conftest modules re-export shared pytest fixtures (a cross-package fixture
+# bridge) and then consume them by name in dependent fixtures — the idiomatic
+# pytest pattern ruff misreads as F811 redefinition.
+"*/conftest.py" = ["F811"]
 
 # --- mypy (strict per project-folder-structure §2) ------------------------------
 
@@ -65,6 +76,14 @@ ignore_errors = true
 module = ["confluent_kafka", "confluent_kafka.*", "environ", "environ.*"]
 ignore_missing_imports = true
 
+# The audit writer (`audit.application.writer.record_audit`) is owned by the
+# Audit app and lands alongside this context; identity/tenancy import it lazily
+# (identity.application.audit, tenancy.application.audit, tenancy.api.viewsets).
+# Tolerate its absence during isolated builds.
+[[tool.mypy.overrides]]
+module = ["audit.application.writer", "audit.application.reader"]
+ignore_missing_imports = true
+
 [tool.django-stubs]
 django_settings_module = "config.settings.test"
 
@@ -74,6 +93,14 @@ django_settings_module = "config.settings.test"
 DJANGO_SETTINGS_MODULE = "config.settings.test"
 python_files = ["test_*.py"]
 addopts = "--strict-markers"
+# Permanent suite markers (testing-strategy §2). --strict-markers requires every
+# marker be declared; the per-PR permanent gates (TEN/GUARD) and the merge-lane
+# OPS suite land here in Phase 2 and grow with later phases.
+markers = [
+    "tenancy: cross-tenant attack suite — OpenAPI route probes + raw-SQL RLS (§7, permanent, unskippable)",
+    "guards: CI guard & meta-tests — check_tenancy canaries, no-rerun meta-test (§7.4)",
+    "ops: operational & lifecycle tests against the compose stack — revocation latency, etc. (§11)",
+]
 
 # --- import-linter contracts (backend-architecture §3.2; CI-blocking) ------------
 
