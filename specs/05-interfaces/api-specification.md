@@ -392,18 +392,17 @@ A verification email is sent. Duplicate email → `409` `conflict` (enumeration 
 ```json
 {
   "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.…",
-  "refresh_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.…",
   "token_type": "Bearer",
   "access_expires_in": 900,
   "refresh_expires_in": 604800
 }
 ```
 
-Bad credentials → `401` `authentication-failed`. Unverified users **can** log in (INV-ID-2). Login success and failure are both audited.
+The refresh token is **never** in the response body: it is set as the `df_refresh` cookie (`HttpOnly; Secure; SameSite=Strict; Path=/api/v1/auth; Max-Age=604800`) per security-architecture SEC-AUTH-2/3. The access token is held in memory by the SPA. Bad credentials → `401` `authentication-failed`. Unverified users **can** log in (INV-ID-2). Login success and failure are both audited.
 
-**`POST /auth/refresh`** — body `{"refresh_token": "…"}`. `200` with the same shape as login; the refresh token is **rotated** — the presented token is invalidated, and reuse of a rotated token revokes the whole family (A-1) → `401` `authentication-required`.
+**`POST /auth/refresh`** — no body; the `df_refresh` cookie carries the refresh token and the `Origin` header is validated against the console allowlist (SEC-AUTH-4). `200` with the same shape as login (access token in body, rotated refresh in a fresh `df_refresh` cookie); the presented refresh token is **rotated** and invalidated, and reuse of a rotated token revokes the whole family (A-1, SEC-AUTH-9) → `401` `authentication-required`.
 
-**`POST /auth/logout`** — JWT + body `{"refresh_token": "…"}`. Invalidates the refresh-token family; the access token expires naturally (≤ 15 min). `204`.
+**`POST /auth/logout`** — JWT + the `df_refresh` cookie. Blacklists the refresh-token family and clears the cookie (`Max-Age=0`); the access token expires naturally (≤ 15 min). `204`.
 
 **`POST /auth/password-reset`** — body `{"email": "…"}`. Always `202` (no enumeration). Reset token TTL 1 h, single-use (INV-ID-3).
 
