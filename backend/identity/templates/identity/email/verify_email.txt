@@ -1,0 +1,11 @@
+Welcome to DataForge!
+
+Confirm this email address to finish setting up your account.
+
+Verify your email:
+{{ link }}
+
+This link expires in {{ ttl_hours }} hours and can be used once.
+If you did not create a DataForge account, you can ignore this message.
+
+— The DataForge team
