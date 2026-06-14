@@ -17,6 +17,11 @@ dependencies = [
     "structlog>=24.4",
     "django-environ>=0.11",
     "django-cors-headers>=4.4",
+    # Phase 3: manifest + envelope JSON Schema validation (Draft 2020-12) and
+    # safe YAML manifest parsing. Pure-Python, framework-free — usable from the
+    # engine package without breaching import-linter contract 2.
+    "jsonschema>=4.20",
+    "pyyaml>=6.0",
     "gunicorn>=23.0",
     "uvicorn[standard]>=0.30",
     "whitenoise>=6.7",
@@ -29,9 +34,14 @@ dev = [
     "django-stubs[compatible-mypy]>=5.1",
     "djangorestframework-stubs[compatible-mypy]>=3.15",
     "celery-types>=0.22",
+    "types-jsonschema>=4.20",
+    "types-pyyaml>=6.0",
     "import-linter>=2.1",
     "pytest>=8.3",
     "pytest-django>=4.9",
+    # Property/invariant lane (testing-strategy §17.1): the PROP-SM-* validator and
+    # registry mutation oracles. Pure-Python; no runtime dependency.
+    "hypothesis>=6.100",
 ]
 
 [tool.uv]

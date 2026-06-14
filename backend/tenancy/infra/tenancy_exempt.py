@@ -36,6 +36,17 @@ EXEMPT_MODELS: dict[str, str] = {
     # tenant-model assertions; the Audit app owns its enforcement.
     "audit.AuditEntry": "Audit hybrid: nullable workspace_id, RLS Class A (§9.5); Audit-app owned.",
     "audit.AuditLog": "Audit hybrid: nullable workspace_id, RLS Class A (§9.5); Audit-app owned.",
+    # Catalog scenarios + manifest versions are hybrid (nullable workspace_id,
+    # §9.5): global (NULL) builtin rows are world-readable; workspace rows are
+    # tenant-owned. RLS Class H (catalog.infra.rls), not the Class T scoped
+    # manager. The Catalog app owns its own enforcement. (database-schema §9.6.)
+    "catalog.Scenario": "Catalog hybrid: nullable workspace_id, RLS Class H (§9.5); app-owned.",
+    "catalog.ManifestVersion": "Catalog hybrid: nullable workspace_id, RLS Class H; app-owned.",
+    # Registry subjects + versions are hybrid (nullable workspace_id, §9.5):
+    # global (NULL) builtin subjects must resolve for every workspace's envelopes
+    # (INV-REG-4). RLS Class H (registry.infra.rls), not Class T. Registry-app owned.
+    "registry.Subject": "Registry hybrid: nullable workspace_id, RLS Class H (§9.5); app-owned.",
+    "registry.SchemaVersion": "Registry hybrid: nullable workspace_id, RLS Class H; app-owned.",
 }
 
 # DRF viewsets that legitimately do NOT extend ``ScopedModelViewSet``

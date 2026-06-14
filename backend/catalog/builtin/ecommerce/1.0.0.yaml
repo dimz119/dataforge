@@ -1,0 +1,479 @@
+# DataForge builtin scenario — e-commerce, Phase 3 SUBSET (1.0.0).
+#
+# This file is DATA, not code (HARD RULE: zero e-commerce logic in Python). It is
+# the §10.2 builtin manifest registered by `manage.py sync_builtin_scenarios`. It
+# is the spec/04-engines/scenarios/ecommerce.md `1.1.0` manifest reduced to the
+# Phase-3 subset (that doc §2, line "The Phase 3 subset 1.0.0 is this document
+# minus refunds/inventory/shipments/reviews ..."):
+#   * entities users / products / orders / payments (users WITHOUT `status`);
+#   * purchase-funnel session machine (PRD F1-F5 subset) + a trimmed
+#     order_lifecycle (placed -> authorized | failed_payment -> closed_cancelled);
+#   * event types 1-4, 6-10 (no cart_abandoned, no inventory_adjusted, ...);
+#   * cdc.entities users / products / orders / payments;
+#   * ZERO `hook` generators (permanent assertion, P-4).
+# Valid against the Manifest v0 JSON Schema + Layers 1+2.
+
+manifest_schema: v0
+
+metadata:
+  slug: ecommerce
+  version: 1.0.0
+  title: E-Commerce
+  description: >-
+    Reference business simulation (Phase 3 subset): a retail storefront with
+    users, a product catalog, orders, and payments. Implements the PRD purchase
+    funnel (F1-F5) and the order placement/payment lifecycle. Zero hooks (P-4).
+  actor_entity: users
+  simulated_timezone: UTC
+
+entities:
+
+  users:
+    description: Shoppers; the scenario's actor entity. CDC row image feeds exercise E4.
+    key_prefix: usr
+    key_attribute: user_id
+    attributes:
+      full_name:        { generator: person.full_name }
+      email:            { generator: person.email, params: { from: full_name } }
+      address:          { generator: address.full }
+      marketing_opt_in: { generator: choice.boolean, params: { p_true: 0.6 } }
+
+  products:
+    description: Catalog items. Popularity skew comes from zipf selection at view time.
+    key_prefix: prd
+    key_attribute: product_id
+    attributes:
+      name:     { generator: commerce.product_name }
+      category: { generator: commerce.category, params: { depth: 2 } }
+      brand:    { generator: commerce.brand }
+      sku:      { generator: commerce.sku }
+      price:    { generator: commerce.price, params: { min: "3.99", max: "499.00", distribution: lognormal } }
+      active:   { generator: choice.boolean, params: { p_true: 0.95 } }
+
+  orders:
+    description: >-
+      One order per completed checkout. primary_product_id / item_count /
+      neg_item_count are denormalized accounting attributes copied from session
+      memory at creation.
+    key_prefix: ord
+    key_attribute: order_id
+    attributes:
+      user_id:            { generator: ref.fk, params: { relationship: order_user } }
+      primary_product_id: { generator: ref.fk, params: { relationship: order_primary_product } }
+      status:             { generator: choice.uniform, params: { options: [placed] } }
+      item_count:         { generator: number.int, params: { min: 1, max: 8 } }
+      neg_item_count:     { generator: number.int, params: { min: -8, max: -1 } }
+      total:              { generator: number.decimal, params: { min: "4.99", max: "4500.00", scale: 2 } }
+
+  payments:
+    description: Exactly one per order that reaches authorization (success or declined).
+    key_prefix: pay
+    key_attribute: payment_id
+    attributes:
+      order_id: { generator: ref.fk, params: { relationship: payment_order } }
+      user_id:  { generator: ref.fk, params: { relationship: payment_user } }
+      amount:   { generator: number.decimal, params: { min: "4.99", max: "4500.00", scale: 2 } }
+      method:   { generator: choice.weighted, params: { options: [
+                    { value: card,      weight: 70 },
+                    { value: paypal,    weight: 15 },
+                    { value: apple_pay, weight: 10 },
+                    { value: gift_card, weight: 5 } ] } }
+      status:   { generator: choice.uniform, params: { options: [authorized] } }
+
+relationships:
+  - { name: order_user,            source_entity: orders,   source_attribute: user_id,            target_entity: users,    cardinality: many_to_one, on_target_delete: restrict }
+  - { name: order_primary_product, source_entity: orders,   source_attribute: primary_product_id, target_entity: products, cardinality: many_to_one, on_target_delete: restrict }
+  - { name: payment_order,         source_entity: payments, source_attribute: order_id,           target_entity: orders,   cardinality: one_to_one,  on_target_delete: restrict, owned: true }
+  - { name: payment_user,          source_entity: payments, source_attribute: user_id,            target_entity: users,    cardinality: many_to_one, on_target_delete: restrict }
+
+event_types:
+
+  # ---- session funnel -------------------------------------------------------
+  session_started:
+    description: Chain root of every session (event-model C-1).
+    partition_by: actor
+    payload:
+      user_id:    { from: actor.user_id }
+      channel:    { generated: { generator: choice.weighted, params: { options: [
+                      { value: web,        weight: 55 },
+                      { value: mobile_app, weight: 30 },
+                      { value: mobile_web, weight: 15 } ] } } }
+      ip_address: { generated: { generator: internet.ip_v4 } }
+      user_agent: { generated: { generator: internet.user_agent } }
+
+  user_registered:
+    description: A new account created mid-session; pairs with cdc.users op c (R-CDC-2).
+    partition_by: actor
+    payload:
+      user_id:          { from: created.users.user_id }
+      email:            { from: created.users.email }
+      full_name:        { from: created.users.full_name }
+      marketing_opt_in: { from: created.users.marketing_opt_in }
+      referral_channel: { generated: { generator: choice.weighted, params: { options: [
+                            { value: organic,     weight: 40 },
+                            { value: paid_search, weight: 25 },
+                            { value: social,      weight: 20 },
+                            { value: referral,    weight: 15 } ] } } }
+
+  product_viewed:
+    description: One per view; zipf product selection gives catalog popularity skew.
+    partition_by: actor
+    payload:
+      user_id:    { from: actor.user_id }
+      product_id: { from: session.last_viewed.product_id }
+      price:      { from: session.last_viewed.unit_price }
+
+  cart_item_added:
+    description: Field set frozen by event-model §7.3. Quantity is always 1 (one line per add).
+    partition_by: actor
+    payload:
+      user_id:    { from: actor.user_id }
+      product_id: { from: session.last_viewed.product_id }
+      quantity:   { const: 1 }
+      unit_price: { from: session.last_viewed.unit_price }
+
+  checkout_started:
+    partition_by: actor
+    payload:
+      user_id:    { from: actor.user_id }
+      items:      { from: session.cart_items }
+      item_count: { from: session.cart_units.units }
+      subtotal:   { generated: { generator: derived.expr, params: {
+                      expr: "round(sum(session.cart_items[].unit_price), 2)", output: decimal, scale: 2 } } }
+
+  order_placed:
+    description: >-
+      Payload derives byte-identically to registry subject ecommerce.order_placed
+      version 1 (schema-registry §9.2) — order_id, user_id, items, currency,
+      subtotal, shipping_fee, total, shipping_country, in this order.
+    partition_by: actor
+    payload:
+      order_id:         { from: created.orders.order_id }
+      user_id:          { from: actor.user_id }
+      items:            { from: session.cart_items }
+      currency:         { const: "USD" }
+      subtotal:         { generated: { generator: derived.expr, params: {
+                            expr: "round(sum(session.cart_items[].unit_price), 2)", output: decimal, scale: 2 } } }
+      shipping_fee:     { generated: { generator: derived.expr, params: {
+                            expr: "4.99", output: decimal, scale: 2 } } }
+      total:            { generated: { generator: derived.expr, params: {
+                            expr: "round(sum(session.cart_items[].unit_price) + 4.99, 2)", output: decimal, scale: 2 } } }
+      shipping_country: { from: actor.address.country }
+
+  # ---- order lifecycle ------------------------------------------------------
+  payment_authorized:
+    description: Subject is the order; the payment row is created by the same transition.
+    partition_by: actor
+    payload:
+      payment_id: { from: created.payments.payment_id }
+      order_id:   { from: subject.order_id }
+      user_id:    { from: subject.user_id }
+      amount:     { from: subject.total }
+      method:     { from: created.payments.method }
+      currency:   { const: "USD" }
+
+  payment_failed:
+    partition_by: actor
+    payload:
+      payment_id:     { from: created.payments.payment_id }
+      order_id:       { from: subject.order_id }
+      user_id:        { from: subject.user_id }
+      amount:         { from: subject.total }
+      method:         { from: created.payments.method }
+      failure_reason: { generated: { generator: choice.weighted, params: { options: [
+                          { value: insufficient_funds, weight: 45 },
+                          { value: card_declined,      weight: 30 },
+                          { value: expired_card,       weight: 15 },
+                          { value: fraud_suspected,    weight: 10 } ] } } }
+
+  order_cancelled:
+    description: >-
+      Emitted from the failed-payment path; the payload is the order intersection
+      resolvable in that context (MAN-V105).
+    partition_by: actor
+    payload:
+      order_id: { from: subject.order_id }
+      user_id:  { from: subject.user_id }
+      total:    { from: subject.total }
+
+state_machines:
+
+  shopping_session:
+    type: session
+    binds: users
+    initial: arrived
+    session_timeout: PT30M
+    states:
+
+      arrived:                              # subset: closing_account edge folded into landing (sum 1.0)
+        transitions:
+          - to: registering
+            probability: 0.08
+            emit: session_started
+            override: { allowed: true, min: 0.0, max: 0.30 }
+          - to: landing
+            probability: 0.92
+            emit: session_started
+            override: { allowed: true, min: 0.50, max: 1.0 }
+
+      registering:
+        transitions:
+          - to: landing
+            probability: 1.0
+            dwell: { family: lognormal, median: PT45S, p95: PT3M }
+            effects:
+              - { action: create, entity: users, set: {} }
+            emit: user_registered
+            override: { allowed: false }
+
+      landing:                              # F1 -- every session views >= 1 product
+        transitions:
+          - to: viewed_nocart
+            probability: 1.0
+            dwell: { family: lognormal, median: PT5S, p95: PT30S }
+            effects:
+              - action: remember
+                key: last_viewed
+                mode: set
+                value:
+                  product_id: { generated: { generator: ref.fk, params: { relationship: order_primary_product, selection: zipf, s: 1.1 } } }
+                  unit_price: { generated: { generator: ref.attr, params: { via: product_id, attribute: price } } }
+            emit: product_viewed
+            override: { allowed: false }
+
+      viewed_nocart:                        # F2 -- 20% add-to-cart per view (sum 1.0)
+        transitions:
+          - to: browsing_cart
+            probability: 0.20
+            dwell: { family: lognormal, median: PT15S, p95: PT90S }
+            effects:
+              - action: remember
+                key: cart_items
+                mode: append
+                value:
+                  product_id: { from: session.last_viewed.product_id }
+                  quantity:   { const: 1 }
+                  unit_price: { from: session.last_viewed.unit_price }
+              - action: remember
+                key: last_added
+                mode: set
+                value:
+                  product_id: { from: session.last_viewed.product_id }
+              - action: remember
+                key: cart_units
+                mode: set
+                value:
+                  units:     { generated: { generator: derived.expr, params: { expr: "count(session.cart_items[].product_id)", output: integer } } }
+                  neg_units: { generated: { generator: derived.expr, params: { expr: "0 - count(session.cart_items[].product_id)", output: integer } } }
+            emit: cart_item_added
+            override: { allowed: true, min: 0.01, max: 0.60 }
+          - to: browsing_nocart
+            probability: 0.80
+            override: { allowed: true, min: 0.40, max: 0.99 }
+
+      browsing_nocart:                      # geometric browse loop, continue p=0.75
+        remainder: exit                     # 25% stop browsing with an empty cart -- silent end
+        transitions:
+          - to: viewed_nocart
+            probability: 0.75
+            dwell: { family: lognormal, median: PT20S, p95: PT2M }
+            effects:
+              - action: remember
+                key: last_viewed
+                mode: set
+                value:
+                  product_id: { generated: { generator: ref.fk, params: { relationship: order_primary_product, selection: zipf, s: 1.1 } } }
+                  unit_price: { generated: { generator: ref.attr, params: { via: product_id, attribute: price } } }
+            emit: product_viewed
+            override: { allowed: true, min: 0.10, max: 0.95 }
+
+      viewed_cart:                          # same add decision, cart already non-empty (sum 1.0)
+        transitions:
+          - to: browsing_cart
+            probability: 0.20
+            dwell: { family: lognormal, median: PT15S, p95: PT90S }
+            effects:
+              - action: remember
+                key: cart_items
+                mode: append
+                value:
+                  product_id: { from: session.last_viewed.product_id }
+                  quantity:   { const: 1 }
+                  unit_price: { from: session.last_viewed.unit_price }
+              - action: remember
+                key: last_added
+                mode: set
+                value:
+                  product_id: { from: session.last_viewed.product_id }
+              - action: remember
+                key: cart_units
+                mode: set
+                value:
+                  units:     { generated: { generator: derived.expr, params: { expr: "count(session.cart_items[].product_id)", output: integer } } }
+                  neg_units: { generated: { generator: derived.expr, params: { expr: "0 - count(session.cart_items[].product_id)", output: integer } } }
+            emit: cart_item_added
+            override: { allowed: true, min: 0.01, max: 0.60 }
+          - to: browsing_cart
+            probability: 0.80
+            override: { allowed: true, min: 0.40, max: 0.99 }
+
+      browsing_cart:                        # browse loop with a non-empty cart (sum 1.0)
+        transitions:
+          - to: viewed_cart
+            probability: 0.75
+            dwell: { family: lognormal, median: PT20S, p95: PT2M }
+            effects:
+              - action: remember
+                key: last_viewed
+                mode: set
+                value:
+                  product_id: { generated: { generator: ref.fk, params: { relationship: order_primary_product, selection: zipf, s: 1.1 } } }
+                  unit_price: { generated: { generator: ref.attr, params: { via: product_id, attribute: price } } }
+            emit: product_viewed
+            override: { allowed: true, min: 0.10, max: 0.95 }
+          - to: cart_review
+            probability: 0.25
+            dwell: { family: lognormal, median: PT30S, p95: PT3M }
+            override: { allowed: true, min: 0.05, max: 0.90 }
+
+      cart_review:                          # F3 -- evaluated once per session with >= 1 cart item (sum 1.0)
+        transitions:
+          - to: checkout
+            probability: 0.40
+            dwell: { family: lognormal, median: PT1M, p95: PT5M }
+            emit: checkout_started
+            override: { allowed: true, min: 0.05, max: 0.95 }
+          - to: abandoned_cart                 # subset: cart_abandoned event removed; edge keeps no emit
+            probability: 0.60
+            dwell: { family: lognormal, median: PT2M, p95: PT10M }
+            override: { allowed: true, min: 0.05, max: 0.95 }
+
+      abandoned_cart: { terminal: true }
+
+      checkout:                             # F4 -- 70% place the order; 30% abandon at checkout
+        remainder: exit
+        transitions:
+          - to: order_done
+            probability: 0.70
+            dwell: { family: lognormal, median: PT3M, p95: PT12M }
+            effects:
+              - action: create
+                entity: orders
+                set:
+                  user_id:            { from: actor.user_id }
+                  primary_product_id: { from: session.last_added.product_id }
+                  status:             { const: placed }
+                  item_count:         { from: session.cart_units.units }
+                  neg_item_count:     { from: session.cart_units.neg_units }
+                  total:              { generated: { generator: derived.expr, params: {
+                                          expr: "round(sum(session.cart_items[].unit_price) + 4.99, 2)", output: decimal, scale: 2 } } }
+            emit: order_placed
+            override: { allowed: true, min: 0.10, max: 0.95 }
+      order_done: { terminal: true }
+
+  order_lifecycle:                          # spawned when an orders entity is created
+    type: lifecycle
+    binds: orders
+    initial: placed
+    states:
+
+      placed:                               # F5 + L1; subset: success edge has no stock guard, goes to terminal `authorized`
+        timeout: { after: PT30M, to: failed_payment }   # L1 hard bound; cancellation emitted by failed_payment
+        transitions:
+          - to: authorized
+            probability: 0.95
+            dwell: { family: lognormal, median: PT45S, p95: PT10M }   # L1
+            effects:
+              - action: create
+                entity: payments
+                set:
+                  order_id: { from: subject.order_id }
+                  user_id:  { from: subject.user_id }
+                  amount:   { from: subject.total }
+                  status:   { const: authorized }
+              - { action: update, target: subject, set: { status: { const: authorized } } }
+            emit: payment_authorized
+            override: { allowed: true, min: 0.50, max: 1.0 }
+          - to: failed_payment
+            probability: 0.05
+            dwell: { family: lognormal, median: PT45S, p95: PT10M }
+            effects:
+              - action: create
+                entity: payments
+                set:
+                  order_id: { from: subject.order_id }
+                  user_id:  { from: subject.user_id }
+                  amount:   { from: subject.total }
+                  status:   { const: declined }
+              - { action: update, target: subject, set: { status: { const: payment_failed } } }
+            emit: payment_failed
+            override: { allowed: true, min: 0.0, max: 0.50 }
+
+      authorized: { terminal: true }
+
+      failed_payment:
+        transitions:
+          - to: closed_cancelled
+            probability: 1.0
+            dwell: { family: lognormal, median: PT5M, p95: PT30M }
+            effects:
+              - { action: update, target: subject, set: { status: { const: cancelled } } }
+            emit: order_cancelled
+            override: { allowed: false }
+
+      closed_cancelled: { terminal: true }
+
+cdc:
+  entities:                                 # subset: users / products / orders / payments
+    users:
+      enabled_default: true
+      ops: [c, u]
+      background_mutations:
+        - name: address_change              # exercise E4 (SCD2): 0.5%/entity/simulated-day
+          rate: { per: entity_day, probability: 0.005 }
+          set: { address: { generator: address.full } }
+    products:
+      enabled_default: true
+      ops: [c, u]
+      background_mutations:
+        - name: price_change                # 1%/entity/day repricing
+          rate: { per: entity_day, probability: 0.01 }
+          set: { price: { generator: commerce.price, params: { min: "3.99", max: "499.00", distribution: lognormal } } }
+    orders:
+      enabled_default: true
+      ops: [c, u]
+    payments:
+      enabled_default: false
+      ops: [c, u]
+
+intensity:                                  # PRD §4.3 exactly; engine renormalizes each curve to mean 1.0
+  diurnal:
+    - { from_hour: 0,  to_hour: 6,  multiplier: 0.30 }
+    - { from_hour: 6,  to_hour: 9,  multiplier: 0.70 }
+    - { from_hour: 9,  to_hour: 12, multiplier: 1.00 }
+    - { from_hour: 12, to_hour: 14, multiplier: 1.25 }
+    - { from_hour: 14, to_hour: 17, multiplier: 1.00 }
+    - { from_hour: 17, to_hour: 20, multiplier: 1.55 }
+    - { from_hour: 20, to_hour: 22, multiplier: 1.80 }
+    - { from_hour: 22, to_hour: 24, multiplier: 0.80 }
+  weekly: { mon: 0.90, tue: 0.90, wed: 0.95, thu: 1.00, fri: 1.10, sat: 1.20, sun: 1.00 }
+
+seeding:
+  catalogs:
+    users:    { default: 5000, min: 100, max: 100000 }
+    products: { default: 1000, min: 50,  max: 100000 }
+
+chaos_defaults:                             # all OFF (PRD §8 guardrail)
+  duplicates:       { enabled: false, rate: 0.05,
+                      params: { copies: [ { count: 1, weight: 1.0 } ],
+                                spacing: { mode: adjacent }, event_types: ["*"] } }
+  late_arriving:    { enabled: false, rate: 0.03,
+                      params: { delay: { family: lognormal, median: PT30M, p95: PT2H },
+                                max_delay: PT24H, event_types: ["*"] } }
+  missing:          { enabled: false, rate: 0.01, params: { event_types: ["*"] } }
+  out_of_order:     { enabled: false, rate: 0.10, params: { window: PT60S, event_types: ["*"] } }
+  corrupted_values: { enabled: false, rate: 0.02,
+                      params: { fields: ["*"], kinds: ["*"], max_fields_per_event: 1, event_types: ["*"] } }
+  nulls:            { enabled: false, rate: 0.02,
+                      params: { fields: ["*"], include_nullable: false, max_fields_per_event: 1, event_types: ["*"] } }
+  schema_drift:     { enabled: false, rate: 0.20, params: { subjects: ["*"], fields: ["*"] } }

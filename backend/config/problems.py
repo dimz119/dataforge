@@ -188,6 +188,49 @@ class ConflictError(ProblemException):
     slug = Slug.CONFLICT
 
 
+# --- 413 -------------------------------------------------------------------
+class PayloadTooLarge(ProblemException):
+    """413 — request body exceeds the endpoint cap (manifest > 512 KiB, B-01)."""
+
+    status_code = status.HTTP_413_REQUEST_ENTITY_TOO_LARGE
+    default_detail = "The request body exceeds the maximum allowed size."
+    slug = Slug.PAYLOAD_TOO_LARGE
+
+    def __init__(self, detail: str | None = None, *, limit_bytes: int, **kwargs: Any) -> None:
+        extensions = dict(kwargs.pop("extensions", {}) or {})
+        extensions["limit_bytes"] = limit_bytes
+        super().__init__(detail, extensions=extensions, **kwargs)
+
+
+# --- 422 -------------------------------------------------------------------
+class ManifestValidationFailed(ProblemException):
+    """422 — manifest or configuration-overlay semantic validation failure (§2.7.4).
+
+    Carries the §8.3 ValidationReport's ``errors[]`` (each ``{code, path, message,
+    bound, actual, scope}``) and ``warnings[]`` as RFC 9457 extension members. The
+    single 422 surface for both manifest ingest (MAN-S/V codes) and overlay
+    re-validation (``scope: "override"``) — and for a non-additive derived schema
+    on re-publish (one ``MAN-V501`` per REG-C violation, ``scope: "schema"``).
+    """
+
+    status_code = status.HTTP_422_UNPROCESSABLE_ENTITY
+    default_detail = "The submitted manifest failed semantic validation."
+    slug = Slug.MANIFEST_VALIDATION_FAILED
+
+    def __init__(
+        self,
+        detail: str | None = None,
+        *,
+        errors: list[dict[str, Any]],
+        warnings: list[dict[str, Any]] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        extensions = dict(kwargs.pop("extensions", {}) or {})
+        extensions["errors"] = errors
+        extensions["warnings"] = warnings or []
+        super().__init__(detail, extensions=extensions, **kwargs)
+
+
 # --- 429 -------------------------------------------------------------------
 class RateLimited(ProblemException):
     """429 — rate-limit bucket exhausted (§2.8); carries Retry-After."""
@@ -212,7 +255,9 @@ __all__ = [
     "ConflictError",
     "EmailNotVerified",
     "InvalidApiKey",
+    "ManifestValidationFailed",
     "NotFoundError",
+    "PayloadTooLarge",
     "PermissionDeniedError",
     "ProblemException",
     "RateLimited",

@@ -230,6 +230,284 @@ paths:
               schema:
                 $ref: '#/components/schemas/VerifyEmailResponse'
           description: ''
+  /api/v1/scenarios:
+    get:
+      operationId: scenarios_list
+      description: 'GET/POST /scenarios (api-spec §4.6 #26, #31).'
+      tags:
+      - scenarios
+      security:
+      - apiKeyAuth: []
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ScenarioSummary'
+          description: ''
+    post:
+      operationId: scenarios_create_draft
+      description: 'GET/POST /scenarios (api-spec §4.6 #26, #31).'
+      tags:
+      - scenarios
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DraftCreate'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/DraftCreate'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/DraftCreate'
+        required: true
+      security:
+      - apiKeyAuth: []
+      - jwtAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ManifestVersionDetail'
+          description: ''
+  /api/v1/scenarios/{scenario_slug}:
+    get:
+      operationId: scenarios_retrieve
+      description: 'GET /scenarios/{scenario_slug} (api-spec §4.6 #27).'
+      parameters:
+      - in: path
+        name: scenario_slug
+        schema:
+          type: string
+        required: true
+      tags:
+      - scenarios
+      security:
+      - apiKeyAuth: []
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScenarioDetail'
+          description: ''
+  /api/v1/scenarios/{scenario_slug}/versions:
+    get:
+      operationId: scenarios_versions_list
+      description: 'GET /scenarios/{scenario_slug}/versions (api-spec §4.6 #28).'
+      parameters:
+      - in: path
+        name: scenario_slug
+        schema:
+          type: string
+        required: true
+      tags:
+      - scenarios
+      security:
+      - apiKeyAuth: []
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/VersionSummary'
+          description: ''
+  /api/v1/scenarios/{scenario_slug}/versions/{manifest_version}:
+    get:
+      operationId: scenarios_version_retrieve
+      description: 'GET /scenarios/{scenario_slug}/versions/{manifest_version} (api-spec
+        §4.6 #29).'
+      parameters:
+      - in: path
+        name: manifest_version
+        schema:
+          type: string
+        required: true
+      - in: path
+        name: scenario_slug
+        schema:
+          type: string
+        required: true
+      tags:
+      - scenarios
+      security:
+      - apiKeyAuth: []
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ManifestVersionDetail'
+          description: ''
+  /api/v1/scenarios/{scenario_slug}/versions/{manifest_version}/publish:
+    post:
+      operationId: scenarios_version_publish
+      description: |-
+        POST …/versions/{manifest_version}/publish (api-spec §4.6 #32).
+
+        JWT, admin of the owning workspace. Requires the persisted ValidationReport
+        passed (INV-CAT-2); derives + registers v1 schemas transactionally (R-DER).
+        Unpassed validation → 409 ``conflict``; a non-additive derived schema (only on
+        a re-publish minor version) → 422 with MAN-V501 errors.
+      parameters:
+      - in: path
+        name: manifest_version
+        schema:
+          type: string
+        required: true
+      - in: path
+        name: scenario_slug
+        schema:
+          type: string
+        required: true
+      tags:
+      - scenarios
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ManifestVersionDetail'
+          description: ''
+  /api/v1/scenarios/{scenario_slug}/versions/{manifest_version}/validation:
+    get:
+      operationId: scenarios_version_validation
+      description: |-
+        GET …/versions/{manifest_version}/validation (api-spec §4.6 #30).
+
+        JWT-only (the L3 dry-run polling target). Returns the persisted §8.3
+        ValidationReport; L3 dry-run lands in Phase 4, so the report's ``dry_run``
+        member is ``null`` for L1+L2-only versions.
+      parameters:
+      - in: path
+        name: manifest_version
+        schema:
+          type: string
+        required: true
+      - in: path
+        name: scenario_slug
+        schema:
+          type: string
+        required: true
+      tags:
+      - scenarios
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationReport'
+          description: ''
+  /api/v1/schemas:
+    get:
+      operationId: schemas_list
+      description: 'GET /schemas (api-spec §4.12 #62).'
+      tags:
+      - schemas
+      security:
+      - apiKeyAuth: []
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SubjectSummary'
+          description: ''
+  /api/v1/schemas/{subject}:
+    get:
+      operationId: schemas_retrieve
+      description: 'GET /schemas/{subject} (api-spec §4.12 #63).'
+      parameters:
+      - in: path
+        name: subject
+        schema:
+          type: string
+        required: true
+      tags:
+      - schemas
+      security:
+      - apiKeyAuth: []
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubjectDetail'
+          description: ''
+  /api/v1/schemas/{subject}/versions:
+    get:
+      operationId: schemas_versions_list
+      description: 'GET /schemas/{subject}/versions (api-spec §4.12 #64).'
+      parameters:
+      - in: path
+        name: subject
+        schema:
+          type: string
+        required: true
+      tags:
+      - schemas
+      security:
+      - apiKeyAuth: []
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/VersionProvenance'
+          description: ''
+  /api/v1/schemas/{subject}/versions/{schema_version}:
+    get:
+      operationId: schemas_version_retrieve
+      description: |-
+        GET /schemas/{subject}/versions/{version} (api-spec §4.12 #65).
+
+        ``{version}`` is an integer or the literal ``latest``. The ``schema`` member is
+        the stored document verbatim (annotations included) — what consumer pipelines
+        fetch to resolve a ``schema_ref`` (exercise E5).
+      parameters:
+      - in: path
+        name: schema_version
+        schema:
+          type: string
+        required: true
+      - in: path
+        name: subject
+        schema:
+          type: string
+        required: true
+      tags:
+      - schemas
+      security:
+      - apiKeyAuth: []
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VersionRecord'
+          description: ''
   /api/v1/users/me:
     get:
       operationId: users_me_retrieve
@@ -637,6 +915,179 @@ paths:
               schema:
                 $ref: '#/components/schemas/Quota'
           description: ''
+  /api/v1/workspaces/{workspace_id}/scenario-instances:
+    get:
+      operationId: scenario_instances_list
+      description: 'GET/POST …/scenario-instances (api-spec §4.7 #33-34).'
+      parameters:
+      - in: path
+        name: workspace_id
+        schema:
+          type: string
+        required: true
+      tags:
+      - workspaces
+      security:
+      - apiKeyAuth: []
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ScenarioInstance'
+          description: ''
+    post:
+      operationId: scenario_instances_create
+      description: 'GET/POST …/scenario-instances (api-spec §4.7 #33-34).'
+      parameters:
+      - in: path
+        name: workspace_id
+        schema:
+          type: string
+        required: true
+      tags:
+      - workspaces
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InstanceCreate'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/InstanceCreate'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/InstanceCreate'
+        required: true
+      security:
+      - apiKeyAuth: []
+      - jwtAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScenarioInstance'
+          description: ''
+  /api/v1/workspaces/{workspace_id}/scenario-instances/{scenario_instance_id}:
+    get:
+      operationId: scenario_instances_retrieve
+      description: 'GET/DELETE …/scenario-instances/{id} (api-spec §4.7 #35, #38).'
+      parameters:
+      - in: path
+        name: scenario_instance_id
+        schema:
+          type: string
+        required: true
+      - in: path
+        name: workspace_id
+        schema:
+          type: string
+        required: true
+      tags:
+      - workspaces
+      security:
+      - apiKeyAuth: []
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScenarioInstance'
+          description: ''
+    delete:
+      operationId: scenario_instances_delete
+      description: 'GET/DELETE …/scenario-instances/{id} (api-spec §4.7 #35, #38).'
+      parameters:
+      - in: path
+        name: scenario_instance_id
+        schema:
+          type: string
+        required: true
+      - in: path
+        name: workspace_id
+        schema:
+          type: string
+        required: true
+      tags:
+      - workspaces
+      security:
+      - apiKeyAuth: []
+      - jwtAuth: []
+      responses:
+        '204':
+          description: No response body
+  /api/v1/workspaces/{workspace_id}/scenario-instances/{scenario_instance_id}/configuration:
+    get:
+      operationId: scenario_instances_configuration_retrieve
+      description: 'GET/PUT …/scenario-instances/{id}/configuration (api-spec §4.7
+        #36-37).'
+      parameters:
+      - in: path
+        name: scenario_instance_id
+        schema:
+          type: string
+        required: true
+      - in: path
+        name: workspace_id
+        schema:
+          type: string
+        required: true
+      tags:
+      - workspaces
+      security:
+      - apiKeyAuth: []
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Configuration'
+          description: ''
+    put:
+      operationId: scenario_instances_configuration_replace
+      description: 'GET/PUT …/scenario-instances/{id}/configuration (api-spec §4.7
+        #36-37).'
+      parameters:
+      - in: path
+        name: scenario_instance_id
+        schema:
+          type: string
+        required: true
+      - in: path
+        name: workspace_id
+        schema:
+          type: string
+        required: true
+      tags:
+      - workspaces
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfigurationReplace'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/ConfigurationReplace'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/ConfigurationReplace'
+        required: true
+      security:
+      - apiKeyAuth: []
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Configuration'
+          description: ''
 components:
   schemas:
     ApiKeyCreate:
@@ -797,6 +1248,26 @@ components:
       required:
       - current_password
       - new_password
+    Configuration:
+      type: object
+      description: '``GET/PUT …/configuration`` (#36/#37) — the overlay + its revision.'
+      properties:
+        config_revision:
+          type: integer
+        configuration:
+          type: object
+          additionalProperties: {}
+      required:
+      - config_revision
+      - configuration
+    ConfigurationReplace:
+      type: object
+      properties:
+        configuration:
+          type: object
+          additionalProperties: {}
+      required:
+      - configuration
     DetailResponse:
       type: object
       properties:
@@ -804,6 +1275,20 @@ components:
           type: string
       required:
       - detail
+    DraftCreate:
+      type: object
+      description: '``POST /scenarios`` — create a workspace-visibility draft (§12
+        AI seam).'
+      properties:
+        workspace_id:
+          type: string
+          format: uuid
+        document:
+          type: object
+          additionalProperties: {}
+      required:
+      - document
+      - workspace_id
     EmailOnlyRequest:
       type: object
       description: resend-verification / password-reset request body.
@@ -815,6 +1300,30 @@ components:
           type: string
       required:
       - email
+    InstanceCreate:
+      type: object
+      properties:
+        name:
+          type: string
+          maxLength: 200
+          minLength: 1
+        scenario_slug:
+          type: string
+          pattern: ^[a-z][a-z0-9_]{0,31}$
+        manifest_version:
+          type: string
+          pattern: ^\d+\.\d+\.\d+$
+        configuration:
+          type: object
+          additionalProperties: {}
+        default_seed:
+          type: integer
+          minimum: 0
+          nullable: true
+      required:
+      - manifest_version
+      - name
+      - scenario_slug
     KeyInfo:
       type: object
       description: The ``GET /auth/key-info`` introspection body (phase doc §27).
@@ -852,6 +1361,31 @@ components:
       properties:
         refresh_token:
           type: string
+    ManifestVersionDetail:
+      type: object
+      properties:
+        scenario_slug:
+          type: string
+        manifest_version:
+          type: string
+        status:
+          type: string
+        sha256:
+          type: string
+        published_at:
+          type: string
+          format: date-time
+          nullable: true
+        document:
+          type: object
+          additionalProperties: {}
+      required:
+      - document
+      - manifest_version
+      - published_at
+      - scenario_slug
+      - sha256
+      - status
     MemberAdd:
       type: object
       properties:
@@ -952,6 +1486,101 @@ components:
       description: |-
         * `admin` - Admin
         * `member` - Member
+    ScenarioDetail:
+      type: object
+      properties:
+        scenario_slug:
+          type: string
+        title:
+          type: string
+        description:
+          type: string
+        visibility:
+          type: string
+        latest_version:
+          type: string
+          nullable: true
+        published_versions:
+          type: array
+          items:
+            type: string
+        created_at:
+          type: string
+          format: date-time
+        versions:
+          type: array
+          items:
+            $ref: '#/components/schemas/VersionSummary'
+      required:
+      - created_at
+      - description
+      - latest_version
+      - published_versions
+      - scenario_slug
+      - title
+      - versions
+      - visibility
+    ScenarioInstance:
+      type: object
+      properties:
+        scenario_instance_id:
+          type: string
+          format: uuid
+        workspace_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        scenario_slug:
+          type: string
+        manifest_version:
+          type: string
+        config_revision:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      required:
+      - config_revision
+      - created_at
+      - manifest_version
+      - name
+      - scenario_instance_id
+      - scenario_slug
+      - updated_at
+      - workspace_id
+    ScenarioSummary:
+      type: object
+      properties:
+        scenario_slug:
+          type: string
+        title:
+          type: string
+        description:
+          type: string
+        visibility:
+          type: string
+        latest_version:
+          type: string
+          nullable: true
+        published_versions:
+          type: array
+          items:
+            type: string
+        created_at:
+          type: string
+          format: date-time
+      required:
+      - created_at
+      - description
+      - latest_version
+      - published_versions
+      - scenario_slug
+      - title
+      - visibility
     ScopesEnum:
       enum:
       - events:read
@@ -1000,6 +1629,62 @@ components:
       - email
       - is_verified
       - user_id
+    SubjectDetail:
+      type: object
+      description: 'Subject detail (#63): the summary plus created_at + per-version
+        provenance.'
+      properties:
+        subject:
+          type: string
+        scenario_slug:
+          type: string
+        compatibility:
+          type: string
+        latest_version:
+          type: integer
+          nullable: true
+        versions:
+          type: array
+          items:
+            type: integer
+        created_at:
+          type: string
+          format: date-time
+        version_provenance:
+          type: array
+          items:
+            $ref: '#/components/schemas/VersionProvenance'
+      required:
+      - compatibility
+      - created_at
+      - latest_version
+      - scenario_slug
+      - subject
+      - version_provenance
+      - versions
+    SubjectSummary:
+      type: object
+      description: Subject summary (#62).
+      properties:
+        subject:
+          type: string
+        scenario_slug:
+          type: string
+        compatibility:
+          type: string
+        latest_version:
+          type: integer
+          nullable: true
+        versions:
+          type: array
+          items:
+            type: integer
+      required:
+      - compatibility
+      - latest_version
+      - scenario_slug
+      - subject
+      - versions
     TokenPairResponse:
       type: object
       description: |-
@@ -1044,6 +1729,35 @@ components:
       - is_verified
       - memberships
       - user_id
+    ValidationReport:
+      type: object
+      description: |-
+        The §8.3 ValidationReport (#30) — the dry-run polling target.
+
+        ``errors``/``warnings`` are wire keys that collide with DRF's own ``Serializer``
+        attributes; the ``# type: ignore[assignment]`` keeps them declared as fields
+        (DRF resolves the shadowing at runtime) while documenting the §8.3 shape.
+      properties:
+        status:
+          type: string
+        schema_version:
+          type: string
+        errors:
+          type: array
+          items:
+            type: object
+            additionalProperties: {}
+        warnings:
+          type: array
+          items:
+            type: object
+            additionalProperties: {}
+        dry_run:
+          type: object
+          additionalProperties: {}
+          nullable: true
+      required:
+      - status
     VerifyEmailRequest:
       type: object
       properties:
@@ -1062,6 +1776,60 @@ components:
       required:
       - is_verified
       - user_id
+    VersionProvenance:
+      type: object
+      description: 'One version''s provenance row (#63 detail, #64 list).'
+      properties:
+        version:
+          type: integer
+        registered_at:
+          type: string
+          format: date-time
+        manifest_version:
+          type: string
+          nullable: true
+      required:
+      - manifest_version
+      - registered_at
+      - version
+    VersionRecord:
+      type: object
+      description: One version's full record including the schema document (#65).
+      properties:
+        subject:
+          type: string
+        version:
+          type: integer
+        manifest_version:
+          type: string
+          nullable: true
+        registered_at:
+          type: string
+          format: date-time
+        schema:
+          type: object
+          additionalProperties: {}
+      required:
+      - manifest_version
+      - registered_at
+      - schema
+      - subject
+      - version
+    VersionSummary:
+      type: object
+      properties:
+        manifest_version:
+          type: string
+        status:
+          type: string
+        published_at:
+          type: string
+          format: date-time
+          nullable: true
+      required:
+      - manifest_version
+      - published_at
+      - status
     Workspace:
       type: object
       properties:

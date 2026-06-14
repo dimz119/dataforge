@@ -91,16 +91,19 @@ services:
       context: ../../backend
       target: dev
     # Dev-only entrypoint (§2.1 api row): migrate + provision_db_roles +
-    # provision_kafka_topics before the runserver command. Prod runs these in the
-    # Fly release command instead (§7.3). migrate + provision_db_roles connect as
-    # the owner/migrate role (MIGRATE_DATABASE_URL); runserver (and every other
-    # backend service) connects as the runtime NOBYPASSRLS role via DATABASE_URL,
-    # so the Postgres RLS backstop is enforced (SEC-TEN-2 / exit criterion #2,#6).
+    # provision_kafka_topics + sync_builtin_scenarios before the runserver command.
+    # Prod runs these in the Fly release command instead (§7.3). migrate +
+    # provision_db_roles + sync_builtin_scenarios connect as the owner/migrate role
+    # (MIGRATE_DATABASE_URL — sync writes Class H global catalog/registry rows,
+    # database-schema §9.6); runserver (and every other backend service) connects
+    # as the runtime NOBYPASSRLS role via DATABASE_URL, so the Postgres RLS backstop
+    # is enforced (SEC-TEN-2 / exit criterion #2,#6). sync runs AFTER migrate so the
+    # catalog/registry tables exist (plugin-arch §10.2).
     entrypoint:
       [
         "bash",
         "-c",
-        'python manage.py migrate --noinput && python manage.py provision_db_roles && python manage.py provision_kafka_topics && exec "$$@"',
+        'python manage.py migrate --noinput && python manage.py provision_db_roles && python manage.py provision_kafka_topics && python manage.py sync_builtin_scenarios && exec "$$@"',
         "--",
       ]
     command: python manage.py runserver 0.0.0.0:8000

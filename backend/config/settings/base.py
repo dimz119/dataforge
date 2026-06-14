@@ -123,8 +123,19 @@ MIGRATE_DATABASE_URL = env.str("MIGRATE_DATABASE_URL", default="")
 if MIGRATE_DATABASE_URL:
     import sys as _sys
 
+    # sync_builtin_scenarios writes global (NULL-workspace) catalog + registry
+    # rows, which the Class H RLS policies permit only for the maintenance/owner
+    # role (database-schema §9.5/§9.6); route it to MIGRATE_DATABASE_URL with the
+    # other DDL-class deploy commands so it has the privileges to INSERT them.
     _DDL_COMMANDS = frozenset(
-        {"migrate", "makemigrations", "sqlmigrate", "showmigrations", "provision_db_roles"}
+        {
+            "migrate",
+            "makemigrations",
+            "sqlmigrate",
+            "showmigrations",
+            "provision_db_roles",
+            "sync_builtin_scenarios",
+        }
     )
     _invoked = _sys.argv[1] if len(_sys.argv) > 1 else ""
     if _invoked in _DDL_COMMANDS:
