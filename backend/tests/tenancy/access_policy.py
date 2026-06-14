@@ -50,6 +50,15 @@ class RouteClass(StrEnum):
     COLLECTION = "collection"  # sub-collection under a workspace id → 404 foreign
     SCOPE = "scope"  # dual JWT|key, scope-gated
     KEY_PROBE = "key_probe"  # API-key-only introspection probe
+    # Global-readable hybrid surface (catalog scenarios, registry subjects): JWT or
+    # key (any/read scope) both return globals + the caller's OWN data only — never
+    # A's workspace-private rows. The path segment (slug/subject) is not a workspace
+    # id, so an unknown literal masks to 404; a 200 carries only globals/own data.
+    GLOBAL_READ = "global_read"
+    # JWT-only catalog write surface (draft create, publish): a key is the wrong
+    # credential → 401; a foreign JWT against a foreign slug/version → 404, or a
+    # 400/422 on the throwaway body. Never 2xx-with-A-data.
+    CATALOG_WRITE = "catalog_write"
 
 
 @dataclass(frozen=True)
@@ -102,6 +111,55 @@ ACCESS_POLICY: dict[tuple[str, str], RouteClass] = {
     ("GET", "/api/v1/workspaces/{workspace_id}/quotas"): RouteClass.SCOPE,
     # --- API-key-only data-plane probe ---------------------------------------
     ("GET", "/api/v1/auth/key-info"): RouteClass.KEY_PROBE,
+    # --- Catalog: scenario reads (globals + caller's own; #26-29) ------------
+    ("GET", "/api/v1/scenarios"): RouteClass.GLOBAL_READ,
+    ("GET", "/api/v1/scenarios/{scenario_slug}"): RouteClass.GLOBAL_READ,
+    ("GET", "/api/v1/scenarios/{scenario_slug}/versions"): RouteClass.GLOBAL_READ,
+    (
+        "GET",
+        "/api/v1/scenarios/{scenario_slug}/versions/{manifest_version}",
+    ): RouteClass.GLOBAL_READ,
+    # Validation poll is JWT-only + slug-resolved (#30): foreign slug → 404, key → 401.
+    (
+        "GET",
+        "/api/v1/scenarios/{scenario_slug}/versions/{manifest_version}/validation",
+    ): RouteClass.OBJECT,
+    # --- Catalog: scenario writes (JWT-only; #31-32) -------------------------
+    ("POST", "/api/v1/scenarios"): RouteClass.CATALOG_WRITE,
+    (
+        "POST",
+        "/api/v1/scenarios/{scenario_slug}/versions/{manifest_version}/publish",
+    ): RouteClass.CATALOG_WRITE,
+    # --- Catalog: scenario instances under a workspace id (#33-38) -----------
+    (
+        "GET",
+        "/api/v1/workspaces/{workspace_id}/scenario-instances",
+    ): RouteClass.SCOPE,  # dual JWT|Key(streams:read); foreign workspace masks → 404
+    (
+        "POST",
+        "/api/v1/workspaces/{workspace_id}/scenario-instances",
+    ): RouteClass.COLLECTION,  # JWT member-only; key → 401
+    (
+        "GET",
+        "/api/v1/workspaces/{workspace_id}/scenario-instances/{scenario_instance_id}",
+    ): RouteClass.SCOPE,
+    (
+        "DELETE",
+        "/api/v1/workspaces/{workspace_id}/scenario-instances/{scenario_instance_id}",
+    ): RouteClass.COLLECTION,  # JWT member-only; key → 401
+    (
+        "GET",
+        "/api/v1/workspaces/{workspace_id}/scenario-instances/{scenario_instance_id}/configuration",
+    ): RouteClass.SCOPE,
+    (
+        "PUT",
+        "/api/v1/workspaces/{workspace_id}/scenario-instances/{scenario_instance_id}/configuration",
+    ): RouteClass.COLLECTION,  # JWT member-only; key → 401
+    # --- Registry: schema reads (globals + caller's own; #62-65) -------------
+    ("GET", "/api/v1/schemas"): RouteClass.GLOBAL_READ,
+    ("GET", "/api/v1/schemas/{subject}"): RouteClass.GLOBAL_READ,
+    ("GET", "/api/v1/schemas/{subject}/versions"): RouteClass.GLOBAL_READ,
+    ("GET", "/api/v1/schemas/{subject}/versions/{schema_version}"): RouteClass.GLOBAL_READ,
 }
 
 
@@ -144,6 +202,23 @@ def expectations(route_class: RouteClass) -> dict[str, CredentialExpectation]:
             "foreign_jwt": CredentialExpectation(frozenset({404})),
             # Foreign key for A's workspace → 404 (foreign workspace masked, W-1).
             "foreign_key": CredentialExpectation(frozenset({404})),
+            "no_cred": CredentialExpectation(frozenset({401})),
+        }
+    if route_class is RouteClass.GLOBAL_READ:
+        # Globals + the caller's OWN data only. A collection (no path id) → 200
+        # carrying globals/own data; a resource read with a literal foreign
+        # slug/subject → 404 (the literal is unknown to B). Never A's private rows.
+        own = CredentialExpectation(frozenset({200, 404}), allow_own_data=True)
+        return {"foreign_jwt": own, "foreign_key": own, "no_cred": CredentialExpectation(
+            frozenset({401})
+        )}
+    if route_class is RouteClass.CATALOG_WRITE:
+        return {
+            # Foreign JWT with a throwaway body / foreign slug: 400 (bad body),
+            # 404 (foreign slug), 403 (not admin), 409/422 — never 2xx-with-A-data.
+            "foreign_jwt": CredentialExpectation(frozenset({400, 403, 404, 409, 422})),
+            # A key on the JWT-only write surface is an absent credential → 401.
+            "foreign_key": CredentialExpectation(frozenset({401})),
             "no_cred": CredentialExpectation(frozenset({401})),
         }
     # KEY_PROBE: API-key-only. A foreign key gets ITS OWN workspace back (200,

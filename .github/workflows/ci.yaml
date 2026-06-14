@@ -79,6 +79,17 @@ jobs:
         run: uv run mypy .
       - name: Import-boundary contracts (import-linter, backend-architecture §3.2)
         run: uv run lint-imports
+      # Permanent guard grep (Phase-3 hard rule): zero e-commerce logic in Python.
+      # The reference scenario is data (catalog/builtin/); the runtime is generic.
+      # The pytest GUARD test asserts the same, this grep is the visible CI gate.
+      - name: Guard — no e-commerce logic in Python
+        run: |
+          if grep -rn ecommerce . --include='*.py' \
+              | grep -v catalog/builtin \
+              | grep -vE '(^|/)tests?/|/test_|:[0-9]+:.*test_|ecommerce\.md' ; then
+            echo "::error::e-commerce logic must never live in Python (Phase-3 hard rule)"
+            exit 1
+          fi
       # UNIT lane: in-memory SQLite, hermetic and fast (testing-strategy §2).
       - name: Tests (pytest, unit lane)
         run: uv run pytest
@@ -95,13 +106,34 @@ jobs:
         run: |
           uv run python manage.py migrate --noinput
           uv run python manage.py provision_db_roles --app-password dataforge_app
-      - name: Integration tests (Postgres RLS + Redis)
+      # Isolation gates as the NON-OWNER dataforge_app role: the cross-tenant attack
+      # suite (auto-enrolling the new Phase-3 catalog/registry routes), raw-SQL RLS
+      # probes, and revocation stopwatch. These prove RLS *bites* — global catalog/
+      # registry rows are readable, workspace rows are scoped, foreign rows are 404.
+      - name: Integration tests — isolation lane (dataforge_app, RLS bites)
         env:
           DJANGO_SETTINGS_MODULE: config.settings.test_postgres
           DATABASE_URL: postgres://dataforge_app:dataforge_app@localhost:5432/dataforge
           MIGRATE_DATABASE_URL: postgres://dataforge:dataforge@localhost:5432/dataforge
           REDIS_URL: redis://localhost:6379/0
         run: uv run pytest tests/tenancy tests/guards tests/ops
+      # Publish-path lane as the OWNER role: the catalog/registry publish + schema-
+      # derivation + registration suites exercise the manifest-publish transaction,
+      # which in production runs as the platform owner (sync_builtin_scenarios via
+      # MIGRATE_DATABASE_URL, database-schema §9.6) because writing *global*
+      # (NULL-workspace) builtin rows is an owner-only operation — the runtime
+      # dataforge_app role can never INSERT a global row (that backstop is what the
+      # isolation lane above asserts). Running these as the owner is therefore the
+      # production-faithful role for the publish path; FORCE RLS exempts the
+      # superuser owner exactly as it does at deploy time. The contract (envelope)
+      # suite is pure-Python and role-agnostic; it rides this lane.
+      - name: Integration tests — publish-path lane (owner; production-faithful)
+        env:
+          DJANGO_SETTINGS_MODULE: config.settings.test_postgres
+          DATABASE_URL: postgres://dataforge:dataforge@localhost:5432/dataforge
+          MIGRATE_DATABASE_URL: postgres://dataforge:dataforge@localhost:5432/dataforge
+          REDIS_URL: redis://localhost:6379/0
+        run: uv run pytest tests/catalog tests/registry tests/contract
 
   frontend:
     name: frontend
@@ -149,6 +181,18 @@ jobs:
         run: uv run python manage.py spectacular --file schema/openapi.yaml
       - name: Fail on uncommitted schema drift (ADR-0014 lockstep)
         run: git diff --exit-code -- schema/openapi.yaml
+      # Phase-3 contract artifacts: the envelope 1.0 JSON Schema (event-model EV-6)
+      # and the Manifest v0 JSON Schema (scenario-plugin §9.1) are committed CI
+      # artifacts like openapi.yaml. `--check` regenerates from the source-of-truth
+      # generator and fails if the committed file drifts — keeping them current.
+      - name: Fail on envelope-1.0 schema artifact drift (EV-6)
+        run: uv run python manage.py generate_envelope_schema --check
+      - name: Fail on manifest-v0 schema artifact drift (§9.1)
+        run: uv run python manage.py generate_manifest_schema --check
+      # Belt-and-suspenders: assert the on-disk artifacts equal the generators
+      # even if a future change skips the management-command path.
+      - name: Schema artifacts match the working tree
+        run: git diff --exit-code -- schema/envelope-1.0.schema.json catalog/schema/manifest-v0.schema.json
 
   folder-lint:
     name: folder-lint

@@ -5,9 +5,12 @@
 # (phase-01-foundations.md).
 #
 # Phase 11 replaces this: full process-group topology (ws/worker/runner per
-# §3.2), the release_command (`migrate --noinput && provision_kafka_topics`,
-# §7.3), the /readyz health check on web, machine count 2, and the companion
-# fly.kafka.toml for the internal-only broker app (§3.4).
+# §3.2), the release_command (`migrate --noinput && provision_db_roles &&
+# provision_kafka_topics && sync_builtin_scenarios`, §7.3 — sync runs AFTER
+# migrate so the catalog/registry tables exist, registering the builtin manifests
+# and deriving their schemas as the maintenance/owner role, Phase 3), the /readyz
+# health check on web, machine count 2, and the companion fly.kafka.toml for the
+# internal-only broker app (§3.4).
 #
 # Secrets (DJANGO_SECRET_KEY, DATABASE_URL, ...) come from `fly secrets set`
 # only — never from this file (secrets rule S-2). [env] is non-secret config.
