@@ -21,6 +21,7 @@ dataforge/
   .gitignore                    # excludes infra/compose/.env, node_modules, dist, .venv, *.pyc
   .pre-commit-config.yaml       # ruff, ruff-format, eslint, prettier, gitleaks — parity with CI stage 1
   pnpm-workspace.yaml           # pnpm 9 workspace root (frontend is the only JS package)
+  Makefile                      # dev-shortcut targets (e.g. golden-regen, property-nightly)
   README.md                     # quickstart: docker compose up from infra/compose/, link to specs/README.md
 ```
 
