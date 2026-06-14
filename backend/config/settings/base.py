@@ -272,6 +272,14 @@ SPECTACULAR_SETTINGS = {
 STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 
+# --- Dataset artifacts (api-spec §4.10; Phase 4) ------------------------------
+# Local filesystem path where backfill dataset JSONL artifacts are written before
+# download. Phase 11 moves these to object storage with signed-URL redirects; the
+# 50,000-event sync/async boundary keeps the synchronous files small.
+DATASET_STORAGE_DIR = env.str("DATASET_STORAGE_DIR", default=str(BASE_DIR / "var" / "datasets"))
+# The estimate at/below which a dataset is generated synchronously (api §4.10.1).
+DATASET_SYNC_EVENT_THRESHOLD = env.int("DATASET_SYNC_EVENT_THRESHOLD", default=50_000)
+
 # --- I18N / misc --------------------------------------------------------------
 LANGUAGE_CODE = "en-us"
 TIME_ZONE = "UTC"

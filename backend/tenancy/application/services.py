@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import re
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 from django.db import IntegrityError, transaction
@@ -33,6 +35,35 @@ from tenancy.domain.models import (
 from tenancy.infra import guc
 
 _SLUG_RE = re.compile(r"^[a-z][a-z0-9-]{1,38}[a-z0-9]$")
+
+
+@contextmanager
+def worker_workspace_scope(workspace_id: uuid.UUID | None) -> Iterator[None]:
+    """Arm a workspace for a Celery task body (Layer-1 contextvar + Layer-2 GUC).
+
+    A web request arms RLS in two layers inside its ``ATOMIC_REQUESTS`` transaction:
+    the scoped-manager contextvar (Layer 1) AND the Postgres GUC ``app.workspace_id``
+    that the RLS policies read (Layer 2). A Celery task has neither — so a task that
+    only set the contextvar would pass the scoped-manager filter but be hidden by
+    RLS (``app_workspace_id()`` is NULL → the row is invisible to the NOBYPASSRLS
+    runtime role), reading rows as "not found".
+
+    This opens one ``transaction.atomic()`` (the GUC is ``SET LOCAL``, so it must
+    live inside a transaction on the same connection the ORM uses), sets the GUC,
+    and arms the contextvar — both cleared on exit. ``workspace_id=None`` (a global
+    builtin) arms neither (the row carries a NULL workspace; RLS admits it via the
+    ``workspace_id IS NULL`` branch).
+    """
+    if workspace_id is None:
+        with transaction.atomic():
+            yield
+        return
+    with transaction.atomic(), workspace_context(workspace_id):
+        guc.set_workspace_guc(workspace_id)
+        try:
+            yield
+        finally:
+            guc.set_workspace_guc(None)
 
 
 def _arm_user_for_membership_read(user: User) -> None:

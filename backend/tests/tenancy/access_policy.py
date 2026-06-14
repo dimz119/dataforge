@@ -155,6 +155,17 @@ ACCESS_POLICY: dict[tuple[str, str], RouteClass] = {
         "PUT",
         "/api/v1/workspaces/{workspace_id}/scenario-instances/{scenario_instance_id}/configuration",
     ): RouteClass.COLLECTION,  # JWT member-only; key → 401
+    # --- Datasets: backfill batch generation (api-spec §4.10 #57-61) ---------
+    # Dual JWT|Key surfaces; the owning workspace (body workspace_id for POST/list,
+    # the key's own workspace, or the dataset's workspace for {id}) masks foreign
+    # access to 404 for both credential types (W-1/W-3). A no-credential request →
+    # 401. SCOPE captures exactly this: foreign_jwt → 404, foreign_key → 404,
+    # no_cred → 401.
+    ("POST", "/api/v1/datasets"): RouteClass.SCOPE,
+    ("GET", "/api/v1/datasets"): RouteClass.SCOPE,
+    ("GET", "/api/v1/datasets/{dataset_id}"): RouteClass.SCOPE,
+    ("GET", "/api/v1/datasets/{dataset_id}/download"): RouteClass.SCOPE,
+    ("DELETE", "/api/v1/datasets/{dataset_id}"): RouteClass.SCOPE,
     # --- Registry: schema reads (globals + caller's own; #62-65) -------------
     ("GET", "/api/v1/schemas"): RouteClass.GLOBAL_READ,
     ("GET", "/api/v1/schemas/{subject}"): RouteClass.GLOBAL_READ,
