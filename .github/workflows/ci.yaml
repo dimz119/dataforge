@@ -90,9 +90,45 @@ jobs:
             echo "::error::e-commerce logic must never live in Python (Phase-3 hard rule)"
             exit 1
           fi
-      # UNIT lane: in-memory SQLite, hermetic and fast (testing-strategy §2).
+      # Engine-genericity GUARD (Phase-4 hard rule BE-T1): the behaviour engine is
+      # a generic interpreter — zero scenario code, no branch/string-match on a
+      # scenario slug. Scan the runtime engine source (excluding its own tests,
+      # which legitimately name a sample slug) for a scenario slug as a string
+      # literal — the shape control-flow branching would take.
+      # The token set here mirrors tests/guards/test_engine_genericity.py (the
+      # permanent pytest gate); the two must agree — slugs + scenario-specific event
+      # types that would only appear as a string literal in a slug/event branch.
+      - name: Guard — no scenario slugs in the engine (BE-T1)
+        run: |
+          if grep -rnE "['\"](ecommerce|purchase_funnel|shopping_session|order_placed|payment_authorized|user_registered|checkout_started|cart_item_added)['\"]" \
+              dataforge_engine/behavior --include='*.py' \
+              | grep -vE '/tests?/' ; then
+            echo "::error::the behaviour engine must contain zero scenario code (BE-T1)"
+            exit 1
+          fi
+      # Permanent gates, fail-fast (testing-strategy §6, §4.1, §17.3): the GOLD-A
+      # byte-identity replay against the committed fixture and the PROP-RI-1..8
+      # referential-integrity suite over the 100k PR profile. Both are pure engine
+      # + ports (no Postgres/Redis), so they run here in the fast lane and gate the
+      # PR before the DB lanes. The 1M ``property_nightly`` profile is NOT run here
+      # (too slow; nightly + attended Phase-4 gate only) — it is excluded by the
+      # pyproject ``addopts`` markexpr and never selected on this PR lane.
+      - name: GOLD-A replay + PROP-RI (100k PR profile)
+        run: uv run pytest -m "golden or property" -q
+      # UNIT lane: in-memory SQLite, hermetic and fast (testing-strategy §2). The
+      # default ``addopts`` deselects ``property_nightly``; this run also re-covers
+      # golden/property/OPS-11 hermetically alongside the rest of the unit suite.
       - name: Tests (pytest, unit lane)
         run: uv run pytest
+      # Phase-4 Layer-3 GUARD (plugin-arch §8.4; phase exit criterion #4): every
+      # builtin manifest is re-validated through the *real* engine in the sandboxed
+      # dry run; the job fails if any builtin cannot sustain est_eps_per_shard >=
+      # 1000 (MAN-D604). Closes the Phase-3 sequencing window — the builtin subset
+      # published before the engine existed is retroactively L3-validated here.
+      - name: Layer-3 GUARD — re-validate builtins through the dry run (§8.4)
+        env:
+          DJANGO_SETTINGS_MODULE: config.settings.test
+        run: uv run python manage.py revalidate_builtins_l3
       # INTEGRATION lane (testing-strategy §7.3): the permanent TEN attack
       # suite, raw-SQL RLS probes, and revocation stopwatch run under Postgres
       # (RLS-bearing, connecting as the non-owner dataforge_app role so FORCE
@@ -110,13 +146,20 @@ jobs:
       # suite (auto-enrolling the new Phase-3 catalog/registry routes), raw-SQL RLS
       # probes, and revocation stopwatch. These prove RLS *bites* — global catalog/
       # registry rows are readable, workspace rows are scoped, foreign rows are 404.
+      # tests/generation/test_postgres holds the Phase-4 ledger RLS + RANGE-partition
+      # routing probes (database-schema §5.5, §9.5/§9.7): a foreign/unset workspace
+      # GUC must see zero ledger rows, and writes must route to the daily partition
+      # matching emitted_at. Those assertions only bite under the non-bypassing
+      # dataforge_app role on real Postgres (they skip on the SQLite unit lane), so
+      # they ride the isolation lane. The fixture (gen_ledger_ws) seeds NO global
+      # scenario, so the runtime role can create its workspace under Class-W WITH CHECK.
       - name: Integration tests — isolation lane (dataforge_app, RLS bites)
         env:
           DJANGO_SETTINGS_MODULE: config.settings.test_postgres
           DATABASE_URL: postgres://dataforge_app:dataforge_app@localhost:5432/dataforge
           MIGRATE_DATABASE_URL: postgres://dataforge:dataforge@localhost:5432/dataforge
           REDIS_URL: redis://localhost:6379/0
-        run: uv run pytest tests/tenancy tests/guards tests/ops
+        run: uv run pytest tests/tenancy tests/guards tests/ops tests/generation/test_postgres
       # Publish-path lane as the OWNER role: the catalog/registry publish + schema-
       # derivation + registration suites exercise the manifest-publish transaction,
       # which in production runs as the platform owner (sync_builtin_scenarios via
@@ -127,13 +170,24 @@ jobs:
       # production-faithful role for the publish path; FORCE RLS exempts the
       # superuser owner exactly as it does at deploy time. The contract (envelope)
       # suite is pure-Python and role-agnostic; it rides this lane.
+      # The Phase-4 generation suite (batch API, ledger gapless sequence_no, pool
+      # seeding, checkpoint/snapshot persistence, GOLD-A byte identity) arms a
+      # workspace via the gen_workspace fixture, which publishes the e-commerce
+      # builtin as a *global* (NULL-workspace) scenario — an owner-only write
+      # (database-schema §9.6), exactly like sync_builtin_scenarios. It therefore
+      # rides the publish-path (owner) lane on real Postgres, proving the ledger
+      # writes, partition routing, and download shape against the partitioned table
+      # (the RLS-negative ledger probes live in the isolation lane above instead).
       - name: Integration tests — publish-path lane (owner; production-faithful)
         env:
           DJANGO_SETTINGS_MODULE: config.settings.test_postgres
           DATABASE_URL: postgres://dataforge:dataforge@localhost:5432/dataforge
           MIGRATE_DATABASE_URL: postgres://dataforge:dataforge@localhost:5432/dataforge
           REDIS_URL: redis://localhost:6379/0
-        run: uv run pytest tests/catalog tests/registry tests/contract
+        run: >-
+          uv run pytest tests/catalog tests/registry tests/contract
+          tests/generation/test_api.py tests/generation/test_batch.py
+          tests/generation/test_golden.py tests/generation/test_checkpoint_snapshot.py
 
   frontend:
     name: frontend

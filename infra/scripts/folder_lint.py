@@ -52,6 +52,7 @@ REQUIRED_FILES: frozenset[str] = frozenset(
 ALLOWED_OPTIONAL: frozenset[str] = frozenset(
     {
         "PLAN.md",  # project planning doc (pre-dates the scaffold)
+        "Makefile",  # dev-shortcut targets (golden-regen, property-nightly); D19 §1
         "pnpm-workspace.yaml",  # listed in D19 §1; materializes if pnpm is adopted
         ".git",
         ".gitleaks.toml",

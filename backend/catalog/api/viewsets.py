@@ -168,6 +168,20 @@ class ScenarioCollectionView(APIView):
             raise ConflictError(str(exc)) from exc
         except ingest.VersionConflict as exc:
             raise ConflictError(str(exc)) from exc
+        # L1+L2 passed (ingest would have raised otherwise) → enqueue the Layer-3
+        # dry run on the validation queue (§8.4); the report is polled via the
+        # validation endpoint. The draft commits regardless of L3 outcome.
+        # ATOMIC_REQUESTS wraps this handler in one transaction; enqueue only AFTER
+        # it commits so the validation worker (a separate connection) can see the
+        # freshly-created draft row — enqueuing inline races the commit and the task
+        # reads "manifest version gone" and exits without running L3.
+        from django.db import transaction
+
+        from catalog.tasks import enqueue_layer3_dry_run
+
+        draft_id = str(draft.id)
+        ws_id = str(workspace_id)
+        transaction.on_commit(lambda: enqueue_layer3_dry_run(draft_id, ws_id))
         body = serializers.ManifestVersionDetailSerializer(_serialize_version_detail(draft)).data
         response = Response(body, status=status.HTTP_201_CREATED)
         response["Location"] = (

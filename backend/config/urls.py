@@ -8,6 +8,7 @@ keys, and audit-read mount alongside).
 from django.urls import include, path
 
 from catalog.api.urls import urlpatterns as catalog_urlpatterns
+from generation.api.urls import urlpatterns as generation_urlpatterns
 from identity.api.urls import urlpatterns as identity_urlpatterns
 from observation.api.health import healthz, readyz
 from registry.api.urls import urlpatterns as registry_urlpatterns
@@ -19,6 +20,7 @@ api_v1_patterns = [
     *tenancy_urlpatterns,
     *catalog_urlpatterns,
     *registry_urlpatterns,
+    *generation_urlpatterns,
 ]
 
 urlpatterns = [

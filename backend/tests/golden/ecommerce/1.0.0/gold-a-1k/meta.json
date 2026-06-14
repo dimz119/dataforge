@@ -1,0 +1,14 @@
+{
+  "config_sha256": "203277f6545151e95415f315906e0ac359533b258cc35370a4bd9e8cb60a29db",
+  "envelope_version": "1.0",
+  "event_count": 1000,
+  "fixture": "gold-a-1k",
+  "jsonl_sha256": "de09d148e3964cb5e3aa65465a7ad6312dd15fda5cc4b0d98c3a35b97c3961b1",
+  "manifest_version": "1.0.0",
+  "scenario_slug": "ecommerce",
+  "seed": 271828182845,
+  "simulated_days": 30,
+  "virtual_epoch": "2026-01-01T00:00:00+00:00",
+  "wall_clock": "DeterministicWallClock(step=1ms/event)",
+  "wall_epoch": "2026-01-01T00:00:00+00:00"
+}

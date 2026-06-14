@@ -188,6 +188,53 @@ class ConflictError(ProblemException):
     slug = Slug.CONFLICT
 
 
+# --- 403 (quota) -----------------------------------------------------------
+class QuotaExceeded(ProblemException):
+    """403 — a plan quota cap was hit (api-spec §4.10 ``quota-exceeded``).
+
+    The dataset endpoint raises this when a backfill request exceeds the
+    workspace plan's ``max_simulated_days`` or estimated-event cap (PRD §7). The
+    breached limit is named via the ``quota`` / ``limit`` / ``requested``
+    extension members so the failure is actionable.
+    """
+
+    status_code = status.HTTP_403_FORBIDDEN
+    default_detail = "The request exceeds your plan's quota."
+    slug = Slug.QUOTA_EXCEEDED
+
+    def __init__(
+        self,
+        detail: str | None = None,
+        *,
+        quota: str | None = None,
+        limit: int | None = None,
+        requested: int | None = None,
+        **kwargs: Any,
+    ) -> None:
+        extensions = dict(kwargs.pop("extensions", {}) or {})
+        if quota is not None:
+            extensions["quota"] = quota
+        if limit is not None:
+            extensions["limit"] = limit
+        if requested is not None:
+            extensions["requested"] = requested
+        super().__init__(detail, extensions=extensions, **kwargs)
+
+
+# --- 409 (state) -----------------------------------------------------------
+class InvalidStateTransition(ProblemException):
+    """409 — an action is illegal in the resource's current state (§2.7.1).
+
+    Used by the dataset download surface: a download against a non-``ready``
+    dataset (still ``queued``/``generating``, or ``failed``/``expired``) is an
+    invalid state transition, not a not-found (api-spec §4.10.3).
+    """
+
+    status_code = status.HTTP_409_CONFLICT
+    default_detail = "The resource is not in a state that permits this action."
+    slug = Slug.INVALID_STATE_TRANSITION
+
+
 # --- 413 -------------------------------------------------------------------
 class PayloadTooLarge(ProblemException):
     """413 — request body exceeds the endpoint cap (manifest > 512 KiB, B-01)."""
@@ -255,11 +302,13 @@ __all__ = [
     "ConflictError",
     "EmailNotVerified",
     "InvalidApiKey",
+    "InvalidStateTransition",
     "ManifestValidationFailed",
     "NotFoundError",
     "PayloadTooLarge",
     "PermissionDeniedError",
     "ProblemException",
+    "QuotaExceeded",
     "RateLimited",
     "Slug",
 ]

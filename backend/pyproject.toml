@@ -42,6 +42,11 @@ dev = [
     # Property/invariant lane (testing-strategy §17.1): the PROP-SM-* validator and
     # registry mutation oracles. Pure-Python; no runtime dependency.
     "hypothesis>=6.100",
+    # OPS-11 / exercise E7 (testing-strategy §11; phase-04 exit criterion #3): the
+    # DuckDB assertion script loads a 100k-event JSONL dataset and runs the three
+    # published E7 queries (row count, orders→users FK join match, daily revenue).
+    # Test-lane only — the engine + delivery path never import it.
+    "duckdb>=1.0",
 ]
 
 [tool.uv]
@@ -69,6 +74,10 @@ select = ["E", "F", "W", "I", "UP", "B", "C4", "DTZ", "RUF"]
 # bridge) and then consume them by name in dependent fixtures — the idiomatic
 # pytest pattern ruff misreads as F811 redefinition.
 "*/conftest.py" = ["F811"]
+# The behavior engine's static value pools (faker-style data, plugin-architecture
+# §4.1-§4.3): realistic user-agent strings and similar literals exceed the line
+# cap by their nature as data, not code.
+"dataforge_engine/behavior/vocab.py" = ["E501"]
 
 # --- mypy (strict per project-folder-structure §2) ------------------------------
 
@@ -102,7 +111,12 @@ django_settings_module = "config.settings.test"
 [tool.pytest.ini_options]
 DJANGO_SETTINGS_MODULE = "config.settings.test"
 python_files = ["test_*.py"]
-addopts = "--strict-markers"
+# ``property_nightly`` (the 1M PROP-RI profile, ~90 s) is deselected by default so
+# the PR/unit lane stays fast; it runs only when explicitly selected
+# (``-m property_nightly``) on the nightly + attended Phase-4 gate lane. The 100k
+# ``property`` profile and ``golden`` replay are fast (~10 s total) and ride the
+# default unit lane — the per-PR permanent gates (testing-strategy §6, §17.3).
+addopts = "--strict-markers -m 'not property_nightly'"
 # Permanent suite markers (testing-strategy §2). --strict-markers requires every
 # marker be declared; the per-PR permanent gates (TEN/GUARD) and the merge-lane
 # OPS suite land here in Phase 2 and grow with later phases.
@@ -110,6 +124,9 @@ markers = [
     "tenancy: cross-tenant attack suite — OpenAPI route probes + raw-SQL RLS (§7, permanent, unskippable)",
     "guards: CI guard & meta-tests — check_tenancy canaries, no-rerun meta-test (§7.4)",
     "ops: operational & lifecycle tests against the compose stack — revocation latency, etc. (§11)",
+    "golden: GOLD-A byte-identity replay under the deterministic injected wall clock (§6)",
+    "property: PROP-RI referential-integrity property suites — PR-profile 100k (§16)",
+    "property_nightly: the 1M nightly/gate property profile — too slow for the PR lane (§16)",
 ]
 
 # --- import-linter contracts (backend-architecture §3.2; CI-blocking) ------------

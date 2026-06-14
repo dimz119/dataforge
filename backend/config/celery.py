@@ -35,7 +35,13 @@ app.conf.broker_transport_options = {"visibility_timeout": 3600}
 app.conf.worker_prefetch_multiplier = 1
 # Explicit per-task queue routing; populated as tasks land so no task ever
 # rides the default queue by accident (§7.2 CI check, Phase 2+).
-app.conf.task_routes = {}
+app.conf.task_routes = {
+    # Phase 4: the backfill batch generation job rides the exports queue (§7.1).
+    "generation.generate_dataset": {"queue": "exports"},
+    # Phase 4: the Layer-3 dry-run validation job rides the validation queue
+    # (plugin-arch §8.4; backend-architecture §7.1).
+    "catalog.validate_manifest_l3": {"queue": "validation"},
+}
 
 app.autodiscover_tasks(related_name="tasks")
 
