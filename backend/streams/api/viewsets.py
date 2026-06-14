@@ -7,10 +7,11 @@ workspace it names. The workspace context is armed on every authenticated reques
 so the Class-T scoped manager filters all stream reads/writes.
 
 The Phase-5 surface: create (#39, T1), list (#40), retrieve (#41), and the
-idempotent start/stop lifecycle verbs (#43-44). Pause/resume/PATCH/chaos/delete
-land in later phases (their service handlers exist; the routes are mounted as those
-phases land). Errors are uniform RFC 9457 (config.problems): foreign/absent → 404,
-quota cap → 403 quota-exceeded, illegal-from-state → 409 invalid-state-transition,
+idempotent start/stop lifecycle verbs (#43-44). Phase 6 adds the pause/resume verbs
+(#45-46, T5/T7) and the live ``PATCH`` mutation (#47, target_tps PIN-3). Chaos/delete
+land in later phases. Errors are uniform RFC 9457 (config.problems): foreign/absent
+→ 404, quota cap → 403 quota-exceeded, illegal-from-state → 409
+invalid-state-transition, an immutable/pinned PATCH field → 400 validation-error,
 deprecated pin → 409 conflict.
 """
 
@@ -249,14 +250,25 @@ class StreamCollectionView(APIView):
         return response
 
 
+# The only fields a PATCH may mutate (api-spec §4.8.2; PIN-3). Everything else on a
+# stream is pinned (PIN-4) — patching it → 400 validation-error "immutable_field".
+_PATCH_MUTABLE_FIELDS = frozenset({"name", "target_tps"})
+
+
 class StreamDetailView(APIView):
-    """GET /streams/{stream_id} (api-spec §4.8 #41).
+    """GET | PATCH /streams/{stream_id} (api-spec §4.8 #41, §4.8.2 #47).
 
     A flat single-resource route (W-2): the workspace is resolved from the resource.
     The scoped manager masks a foreign stream to no-row → 404 — but the context must
     be armed first. We resolve the stream's workspace via the unscoped manager by its
     unique id, then verify the caller may see that workspace (foreign → 404), arm it,
     and re-read through the scoped manager.
+
+    ``PATCH`` is the live mutation surface (§4.8.2): ``name``/``target_tps`` only
+    (PIN-3). ``target_tps`` is bounded 1..1,000 (out of range → 400) and quota-capped
+    at command time (above the plan per-stream cap → 403, INV-TEN-5); the runner picks
+    it up within 2 s. Any other body key names a pinned field (PIN-4) → 400
+    validation-error with ``errors[0].code = "immutable_field"``.
     """
 
     authentication_classes: list[type] = [ApiKeyAuthentication, DataForgeJWTAuthentication]
@@ -269,6 +281,58 @@ class StreamDetailView(APIView):
     def get(self, request: Request, stream_id: str) -> Response:
         stream = _resolve_stream_for_principal(request, _uuid(stream_id), write=False)
         return _response(stream)
+
+    @extend_schema(
+        operation_id="streams_patch",
+        request=serializers.StreamPatchSerializer,
+        responses={200: serializers.StreamResponseSerializer},
+    )
+    def patch(self, request: Request, stream_id: str) -> Response:
+        stream = _resolve_stream_for_principal(request, _uuid(stream_id), write=True)
+        _reject_immutable_keys(request)
+        serializer = serializers.StreamPatchSerializer(data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        data = dict(serializer.validated_data)
+        if "target_tps" in data:
+            try:
+                stream = services.request_set_target_tps(
+                    stream=stream, target_tps=int(data["target_tps"]), actor=request.user
+                )
+            except services.StreamQuotaExceeded as exc:
+                raise QuotaExceeded(
+                    str(exc), quota=exc.quota, limit=exc.limit, requested=exc.requested
+                ) from exc
+        if "name" in data:
+            stream = services.request_rename(
+                stream=stream, name=str(data["name"]), actor=request.user
+            )
+        return _response(stream)
+
+
+def _reject_immutable_keys(request: Request) -> None:
+    """Reject a body key naming a pinned field (PIN-4) → 400 immutable_field.
+
+    The merge-patch body may carry only ``name``/``target_tps``; any other key is a
+    pinned field a new stream is required for (manifest_version, seed, pinned_config,
+    virtual_clock, …). Masked before serializer validation so the contract code
+    ``immutable_field`` is surfaced (api-spec §4.8.2).
+    """
+    from rest_framework.exceptions import ErrorDetail
+    from rest_framework.serializers import ValidationError
+
+    body = request.data if isinstance(request.data, dict) else {}
+    pinned = [k for k in body if k not in _PATCH_MUTABLE_FIELDS]
+    if pinned:
+        field = pinned[0]
+        raise ValidationError(
+            {
+                field: ErrorDetail(
+                    f"{field!r} is pinned at create and immutable (INV-STR-5); "
+                    f"start a new stream to change it.",
+                    code="immutable_field",
+                )
+            }
+        )
 
 
 def _resolve_stream_for_principal(
@@ -301,6 +365,56 @@ def _resolve_stream_for_principal(
     if scoped is None:
         raise NotFoundError()
     return scoped
+
+
+class StreamStatsView(APIView):
+    """GET /streams/{stream_id}/stats (api-spec §4.11.1 #55; T-none, Phase 6).
+
+    The tenant-facing StreamStats read: Redis-resident, rebuildable counters
+    (``total_events``, ``observed_tps``, ``by_event_type``, ``last_event_at``) with
+    staleness ≤ 5 s (INV-OBS-2), workspace-scoped (INV-OBS-3). JWT or API-key
+    (``streams:read``); a foreign-workspace credential masks to 404 (W-1/W-3) via the
+    shared resolver. ``health`` is derived from the runner lease (heartbeat-fresh
+    ≤ 15 s) + the counters' age (§4.11.1).
+    """
+
+    authentication_classes: list[type] = [ApiKeyAuthentication, DataForgeJWTAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        operation_id="streams_stats",
+        responses={200: serializers.StreamStatsResponseSerializer},
+    )
+    def get(self, request: Request, stream_id: str) -> Response:
+        from delivery.application.stream_stats_service import (
+            StreamControlFacts,
+            build_stream_stats,
+        )
+        from streams.infra.leases import has_live_lease
+
+        stream = _resolve_stream_for_principal(request, _uuid(stream_id), write=False)
+        # health: a live lease on ANY shard means the runner heartbeat is fresh (§8.2
+        # SET PX 15000 ⇒ the key's existence is the ≤ 15 s freshness signal, §4.11.1).
+        runner_alive = any(
+            has_live_lease(stream.id, shard_id)
+            for shard_id in range(max(1, stream.shard_count))
+        )
+        facts = StreamControlFacts(
+            stream_id=str(stream.id),
+            status=stream.status,
+            lifecycle_state=stream.lifecycle_state,
+            target_tps=stream.target_tps,
+            # virtual_now is the runner-advanced live position (Observation-served);
+            # not surfaced through the control-plane row in Phase 6 → null (mirrors
+            # the Stream resource's virtual_clock.virtual_now).
+            virtual_now=None,
+            speed_multiplier=float(stream.speed_multiplier),
+            runner_alive=runner_alive,
+        )
+        body = build_stream_stats(workspace_id=str(stream.workspace_id), facts=facts)
+        return Response(
+            serializers.StreamStatsResponseSerializer(body).data, status=status.HTTP_200_OK
+        )
 
 
 class _LifecycleVerbView(APIView):
@@ -352,3 +466,57 @@ class StreamStopView(_LifecycleVerbView):
         stream = self._resolve(request, stream_id)
         stream = services.request_stop(stream=stream, actor=request.user)
         return _response(stream)
+
+
+class StreamPauseView(_LifecycleVerbView):
+    """POST /streams/{stream_id}/pause (api-spec §4.8.1 #45; T5).
+
+    Idempotent (INV-STR-3): pause on a paused-desired stream is a no-op returning
+    current state. Guarded: pause is legal only from a live lifecycle
+    (``running``/``starting``/``resuming``) — else 409 invalid-state-transition (T5).
+    Always an explicit user pause here (``status_reason = user``); the quota/idle
+    system-pause TRIGGERS are Phase 11 (the lifecycle Celery handler calls
+    ``request_pause(reason=...)`` directly, not this route).
+    """
+
+    @extend_schema(
+        operation_id="streams_pause",
+        request=None,
+        responses={200: serializers.StreamResponseSerializer},
+    )
+    def post(self, request: Request, stream_id: str) -> Response:
+        stream = self._resolve(request, stream_id)
+        try:
+            stream = services.request_pause(stream=stream, actor=request.user)
+        except services.StreamNotPausable as exc:
+            raise InvalidStateTransition(str(exc)) from exc
+        return _response(stream)
+
+
+class StreamResumeView(_LifecycleVerbView):
+    """POST /streams/{stream_id}/resume (api-spec §4.8.1 #46; T7).
+
+    Idempotent (INV-STR-3): resume on a running-desired stream is a no-op. Guarded:
+    resume is legal only from ``paused``/``pausing`` — else 409. If the pause reason
+    was ``quota`` (Phase 11), restored headroom is required at command time
+    (INV-TEN-5) → else 403 quota-exceeded (T7).
+    """
+
+    @extend_schema(
+        operation_id="streams_resume",
+        request=None,
+        responses={200: serializers.StreamResponseSerializer},
+    )
+    def post(self, request: Request, stream_id: str) -> Response:
+        stream = self._resolve(request, stream_id)
+        try:
+            stream = services.request_resume(stream=stream, actor=request.user)
+        except services.StreamQuotaExceeded as exc:
+            raise QuotaExceeded(
+                str(exc), quota=exc.quota, limit=exc.limit, requested=exc.requested
+            ) from exc
+        except services.StreamNotResumable as exc:
+            raise InvalidStateTransition(str(exc)) from exc
+        return _response(stream)
+
+

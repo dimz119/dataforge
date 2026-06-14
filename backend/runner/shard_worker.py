@@ -9,8 +9,8 @@ heartbeat, and admission control; this module owns the *normative* §8.3 tick:
     report lifecycle running (T3)          ── runner-converged column
     loop @1000ms:
       1. poll desired (batched read)
-      2. reconcile lifecycle (stopped→finalize T10 / paused→T6 minimal hold)
-      3. pacing  rate = target_tps / shard_count
+      2. reconcile lifecycle (stopped→finalize T10 / paused→T6 / resume→T7→T8)
+      3. pacing  rate = target_tps / shard_count  + engine live TPS (BE-P2)
       4. generate (paced budget ≤ 500, until = tick-end)
       5. ledger.append  BEFORE chaos      (INV-GEN-5: ledger is clean truth)
       6. chaos.transform  IDENTITY        (Phase 9 pass-through slot)
@@ -23,9 +23,25 @@ heartbeat, and admission control; this module owns the *normative* §8.3 tick:
 Pipeline-order guarantees as code positions: ledger append precedes chaos (5 < 6);
 checkpoint captures RNG cursors + clock + last sequence_no so a failover replays at
 most 30 s of *deterministic* generation into the idempotent ledger/Kafka sinks
-(§8.5). Pause/resume FULL semantics (checkpoint-on-pause holding warm state, dynamic
-TPS, WS) are Phase 6 — Phase 5 ships start/stop, the failover path, and a minimal
-T6 hold-lease-and-halt branch.
+(§8.5).
+
+Pause/resume (Phase 6, the real T6/T7/T8):
+
+* **Pause (T5→T6):** desired ``paused`` → halt emission within ONE tick, persist a
+  checkpoint SYNCHRONOUSLY before reporting ``paused``, RETAIN the lease, freeze the
+  virtual clock at the frontier ``F``, and idle-poll desired. The warm engine state
+  stays in memory (a paused stream keeps its holder + state); no restore on resume.
+* **Resume (T7→T8):** desired ``running`` again while paused → re-anchor the virtual
+  clock at ``(wall_now, F)`` (dwell timers rebase automatically — they store absolute
+  virtual due-times, §9.3 step 4), report ``running``, and continue ticking. In-flight
+  funnels continue with ZERO ``sequence_no`` gaps (the counter never left memory).
+* **Stop-override (T9):** a desired ``stopped`` seen while pausing/paused/running wins
+  — finalize (T10) regardless of the prior pause intent.
+
+Dynamic TPS (§3.6, ≤ 2 s): each running tick reads ``desired.target_tps`` into both
+the token bucket (wall rate) and the engine's live TPS slot (arrival density, BE-P2),
+so a change is effective within one poll + one pacing adjustment. The recorded value
+is the determinism input (BE-P4): replays of the same stream read the same schedule.
 
 The engine stays pure: this host compiles the IR, builds a *live* shard, injects
 the ledger/publisher/checkpoint adapters, and drives ``Shard.generate``. No Django
@@ -139,7 +155,11 @@ class ShardWorker:
         self._shard_count: int = 1
         self._checkpoint_seq: int = 0
         self._last_checkpoint_at: float = 0.0
-        self._paused_checkpoint_done: bool = False
+        # Pause/resume bookkeeping (T6/T8). ``_paused`` is the warm-hold flag: while
+        # set, the worker idles (lease retained, emission halted, clock frozen). It is
+        # entered once per pause (synchronous checkpoint on entry) and cleared on the
+        # resume transition (clock re-anchored, lifecycle reported running again).
+        self._paused: bool = False
         self.ticks = 0
         self.emitted_total = 0
 
@@ -256,9 +276,12 @@ class ShardWorker:
     async def _tick(self) -> bool:
         """One §8.3 reconciliation tick. Returns ``True`` when the worker must stop.
 
-        Steps 1-9 in normative order. A ``stopped`` desired state finalizes (T10)
-        and returns ``True``; a ``paused`` desired state holds the lease and halts
-        emission (T6 minimal, Phase 6 owns the warm-state semantics).
+        Steps 1-9 in normative order. A ``stopped`` desired state finalizes (T10) and
+        returns ``True`` — and it wins over an in-flight pause/resume (T9 stop-override).
+        A ``paused`` desired state halts emission within one tick, checkpoints
+        synchronously, retains the lease, freezes the clock, and idles (T6). A
+        ``running`` desired state seen while paused resumes (T7→T8): re-anchor the
+        clock, report ``running``, continue with zero ``sequence_no`` gaps.
         """
         assert self._shard is not None
         assert self._ledger is not None
@@ -268,21 +291,32 @@ class ShardWorker:
         # 1. poll desired (one batched Postgres read per process per tick; here the
         #    single-shard MVP reads its own row — the supervisor batches in Phase 11).
         desired = await asyncio.to_thread(desired_state.desired_for, self._stream_id)
+
+        # 2. reconcile lifecycle. STOP wins over everything, including an in-flight
+        #    pause/resume (T9 stop-override): a stopped (or vanished) stream finalizes
+        #    regardless of the warm-hold flag.
         if desired is None or desired.run_state == RUN_STOPPED:
             await self._finalize()
             return True
 
-        # 2. reconcile lifecycle.
         if desired.run_state == RUN_PAUSED:
-            # T6 MINIMAL: hold the lease, halt emission, checkpoint once on entry,
-            # idle-poll desired. Phase 6 owns the full pause (warm state, dwell
-            # rebase on resume, dynamic TPS, WS).  # Phase 6
+            # T5→T6: halt in one tick, synchronous checkpoint before reporting paused,
+            # retain the lease, freeze the clock, idle-poll. Warm state stays in memory.
             await self._enter_paused()
             return False
 
-        # 3. pacing: rate = target_tps / shard_count (PIN-3 live param, §8.3 step 3).
+        # desired == running.
+        if self._paused:
+            # T7→T8 resume: re-anchor the clock (dwell rebase, §9.3 step 4), report
+            # running again, continue. The engine state never left memory.
+            await self._resume_from_paused()
+
+        # 3. pacing + live params (§8.3 step 3; dynamic TPS BE-P2, ≤ 2 s).
+        #    The bucket adopts the new wall rate AND the engine adopts the new arrival
+        #    density this same poll — the recorded TPS value is the determinism input.
         rate = desired.target_tps / self._shard_count
         self._bucket.set_rate(rate)
+        self._shard.set_target_tps(float(desired.target_tps))
         # chaos.configure(desired.chaos) is a Phase 9 no-op (identity slot).  # Phase 9
 
         # 4. generate (paced).
@@ -413,16 +447,94 @@ class ShardWorker:
         )
 
     async def _enter_paused(self) -> None:
-        """T6 MINIMAL (Phase 6 owns the full semantics): checkpoint once, halt.
+        """T5→T6 pause: halt within one tick, checkpoint synchronously, hold the lease.
 
-        Phase 5 holds the lease (a paused stream stays claimable to its holder per
-        T6) and stops emitting; it does not advance warm state or schedule late
-        re-emissions. The supervisor keeps heartbeating the lease, so the worker
-        idles here one tick at a time until desired flips to running or stopped.
-        """  # Phase 6
-        if not self._paused_checkpoint_done:
-            await self._checkpoint()
-            self._paused_checkpoint_done = True
+        On the FIRST tick that observes desired ``paused`` (``_paused`` not yet set)
+        the worker:
+
+        * emits NOTHING this tick (the branch returns before generate/publish) — so
+          emission halts within one tick, with no ``emitted_at`` later than the
+          pause-convergence tick + one tick (exit criterion 1);
+        * persists a checkpoint SYNCHRONOUSLY (the fenced conditional write) BEFORE
+          reporting ``paused`` (T6 / §8.4 "once, synchronously before reporting
+          paused") — the virtual clock is implicitly frozen at the frontier ``F``
+          because no further segment advance happens while idling;
+        * reports the runner-converged lifecycle ``paused`` (preserving the
+          control-plane ``status_reason`` so ``paused_quota``/``paused_idle`` render).
+
+        On every SUBSEQUENT paused tick the worker simply idles (lease retained by the
+        supervisor's heartbeat; nothing emitted, no re-checkpoint). The warm engine
+        state stays in memory for a zero-restore resume (T8).
+        """
+        if self._paused:
+            return  # already converged to paused — idle this tick (lease retained)
+        assert self._shard is not None
+        # Synchronous checkpoint BEFORE reporting paused (T6). A stale token raises
+        # FencingError (a takeover happened); the worker stops and the new holder owns
+        # the durable state. Pause halts emission this tick: no generate/publish ran.
+        await self._checkpoint()
+        self._paused = True
+        await self._report_paused()
+        logger.info(
+            "shard.paused",
+            stream_id=self._stream_id,
+            shard_id=self._shard_id,
+            checkpoint_seq=self._checkpoint_seq,
+            frontier_us=self._shard.clock.frontier_us,
+        )
+
+    async def _report_paused(self) -> None:
+        """Converge lifecycle to ``paused``, preserving the desired ``status_reason``.
+
+        The control plane wrote the pause reason (user/quota/idle); the runner
+        converges the lifecycle column to ``paused`` while keeping that reason so
+        ``Stream.status`` renders ``paused_quota``/``paused_idle`` (domain-model §4.3
+        surfaced-status string). Re-reads the reason from the desired-state row so a
+        system pause that changed it after the worker entered the branch is honoured.
+        """
+        from streams.domain.models import LC_PAUSED, REASON_USER
+
+        desired = await asyncio.to_thread(desired_state.desired_for, self._stream_id)
+        reason = desired.status_reason if desired is not None else REASON_USER
+        await lifecycle.report_lifecycle(
+            self._stream_id,
+            LC_PAUSED,
+            status_reason=reason,
+            workspace_id=self._workspace_id,
+        )
+
+    async def _resume_from_paused(self) -> None:
+        """T7→T8 resume: re-anchor the clock (dwell rebase) and report running again.
+
+        The pause held the warm engine state in memory and froze the virtual clock at
+        the frontier ``F``. Resume opens a fresh run segment anchored at
+        ``(wall_now, F)`` so ``virtual_now`` continues from ``F`` and dwell timers —
+        which store absolute virtual due-times — are rebased to the resumed virtual
+        clock with no per-timer recomputation (§9.3 step 4). In-flight funnels continue
+        with ZERO ``sequence_no`` gaps: the gapless counter, the heap, and the pools
+        never left memory. The token bucket is re-primed to ``wall_now`` so the freeze
+        interval does not credit a burst of stale tokens. Then lifecycle converges back
+        to ``running`` (T8) and this same tick proceeds to generate.
+        """
+        assert self._shard is not None and self._bucket is not None
+        now = self._wall.now()
+        self._shard.reopen_clock_segment(now)
+        # Re-anchor the bucket at the resumed wall instant: the paused interval must
+        # not accrue tokens (pacing is wall-domain; a long pause would otherwise grant
+        # a full-capacity burst on resume). A fresh bucket at the held rate re-anchors
+        # ``_last`` to ``now`` cleanly (TokenBucket has no public reset).
+        self._bucket = TokenBucket(rate_per_second=self._bucket.rate, now=now)
+        self._paused = False
+        await lifecycle.report_lifecycle(
+            self._stream_id, lifecycle.RUNNING, workspace_id=self._workspace_id
+        )
+        logger.info(
+            "shard.resumed",
+            stream_id=self._stream_id,
+            shard_id=self._shard_id,
+            frontier_us=self._shard.clock.frontier_us,
+            last_sequence_no=self._shard.sequence.last,
+        )
 
     # -- timing ------------------------------------------------------------------
 

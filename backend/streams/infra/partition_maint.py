@@ -26,7 +26,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import structlog
-from django.db import connection
+from django.db import connection, connections
 
 logger = structlog.get_logger(__name__)
 
@@ -36,7 +36,21 @@ _LEDGER_RETENTION_DAYS = 7
 _BUFFER_HOURS_AHEAD = 3
 _BUFFER_RETENTION_HOURS = 24
 
+# Partition DDL needs the owner (``dataforge_migrate``) role; the runtime
+# ``default`` connection is NOBYPASSRLS and lacks DDL privileges by design
+# (SEC-TEN-2). Settings registers the ``maintenance`` alias (owner role) for
+# exactly this; when it is absent (the test lane connects as the owner via
+# ``default``) we transparently fall back to ``default`` (§7.1).
+_MAINTENANCE_ALIAS = "maintenance"
+
 __all__ = ["maintain_buffer_partitions", "maintain_ledger_partitions"]
+
+
+def _ddl_connection() -> Any:
+    """The owner-role connection for partition DDL, or ``default`` if unconfigured."""
+    if _MAINTENANCE_ALIAS in connections:
+        return connections[_MAINTENANCE_ALIAS]
+    return connection
 
 
 def maintain_ledger_partitions(*, days_ahead: int = _LEDGER_DAYS_AHEAD) -> dict[str, list[str]]:
@@ -46,7 +60,8 @@ def maintain_ledger_partitions(*, days_ahead: int = _LEDGER_DAYS_AHEAD) -> dict[
     no-op on non-PostgreSQL (partitioning is a Postgres construct). Returns the
     created + dropped partition names for the task log.
     """
-    if connection.vendor != "postgresql":
+    ddl = _ddl_connection()
+    if ddl.vendor != "postgresql":
         logger.info("ledger_partition_maint_skipped", reason="non-postgres vendor")
         return {"created": [], "dropped": []}
     from generation.infra import partitions
@@ -54,7 +69,7 @@ def maintain_ledger_partitions(*, days_ahead: int = _LEDGER_DAYS_AHEAD) -> dict[
     today = datetime.now(UTC).date()
     created: list[str] = []
     dropped: list[str] = []
-    with connection.cursor() as cursor:
+    with ddl.cursor() as cursor:
         created = partitions.ensure_partitions(cursor, start=today, days_ahead=days_ahead)
         # Drop the day that has just fallen out of the 7-day window (idempotent).
         expired_day = today - timedelta(days=_LEDGER_RETENTION_DAYS + 1)
@@ -74,7 +89,8 @@ def maintain_buffer_partitions(
     This orchestrator calls its seam and gracefully skips when it is not yet built
     (the beat is safe to run before delivery lands). A no-op on non-PostgreSQL.
     """
-    if connection.vendor != "postgresql":
+    ddl = _ddl_connection()
+    if ddl.vendor != "postgresql":
         logger.info("buffer_partition_maint_skipped", reason="non-postgres vendor")
         return {"created": [], "dropped": []}
     buffer_partitions = _load_buffer_partition_manager()
@@ -84,7 +100,7 @@ def maintain_buffer_partitions(
     now = datetime.now(UTC)
     created: list[str] = []
     dropped: list[str] = []
-    with connection.cursor() as cursor:
+    with ddl.cursor() as cursor:
         created = list(
             buffer_partitions.ensure_partitions(cursor, start=now, hours_ahead=hours_ahead)
         )
