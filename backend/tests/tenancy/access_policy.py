@@ -166,6 +166,23 @@ ACCESS_POLICY: dict[tuple[str, str], RouteClass] = {
     ("GET", "/api/v1/datasets/{dataset_id}"): RouteClass.SCOPE,
     ("GET", "/api/v1/datasets/{dataset_id}/download"): RouteClass.SCOPE,
     ("DELETE", "/api/v1/datasets/{dataset_id}"): RouteClass.SCOPE,
+    # --- Streams: control-plane lifecycle (api-spec §4.8 #39-44) -------------
+    # Dual JWT|Key surfaces; the owning workspace (body workspace_id for POST/list,
+    # the key's own workspace, or the stream's workspace for {id}) masks foreign
+    # access to 404 for both credential types (W-1/W-3). No credential → 401. SCOPE
+    # captures exactly this: foreign_jwt → 404, foreign_key → 404, no_cred → 401.
+    ("POST", "/api/v1/streams"): RouteClass.SCOPE,
+    ("GET", "/api/v1/streams"): RouteClass.SCOPE,
+    ("GET", "/api/v1/streams/{stream_id}"): RouteClass.SCOPE,
+    ("POST", "/api/v1/streams/{stream_id}/start"): RouteClass.SCOPE,
+    ("POST", "/api/v1/streams/{stream_id}/stop"): RouteClass.SCOPE,
+    # --- Delivery: REST cursor pull (api-spec §4.9.1; delivery-channels §5) ---
+    # Dual JWT|Key(events:read) data-plane read over event_buffer; the stream's
+    # owning workspace masks foreign access to 404 for both credential types (W-1/
+    # RC-5). No credential → 401. SCOPE captures foreign_jwt→404, foreign_key→404,
+    # no_cred→401. (Insufficient events:read within own workspace → 403 is the unit
+    # suite's job; the cross-tenant probe never reaches it — the workspace masks first.)
+    ("GET", "/api/v1/streams/{stream_id}/events"): RouteClass.SCOPE,
     # --- Registry: schema reads (globals + caller's own; #62-65) -------------
     ("GET", "/api/v1/schemas"): RouteClass.GLOBAL_READ,
     ("GET", "/api/v1/schemas/{subject}"): RouteClass.GLOBAL_READ,

@@ -178,14 +178,19 @@ services:
     build:
       context: ../../backend
       target: dev
-    # Phase 1 stub: heartbeats + aiohttp health listener on :8081 only
-    # (backend-architecture §8.1). Real shard-runner logic lands in Phases
-    # 5-6 with this same command (principle D-1).
+    # Real shard-runner data plane (backend-architecture §8): desired-state
+    # reconciliation, Redis leases + fencing, checkpoints, Kafka publish.
+    # Phase 5 runs >=2 replicas for the failover kill-test
+    # (`docker compose up --scale runner=2`, demo-phase05.sh step 1).
     command: python -m runner --role generation
     env_file:
       - .env
+    # A host PORT RANGE (not a fixed mapping) so `--scale runner=2` gives each
+    # replica a distinct debug-health host port instead of colliding on one
+    # (the failover demo needs two concurrent runner containers). Health on
+    # :8081 inside each container is unchanged; the host side is debug-only.
     ports:
-      - "8090:8081" # health, debug only
+      - "8090-8099:8081" # health, debug only — range admits scaled replicas
     volumes:
       - ../../backend:/app
     depends_on:
@@ -213,7 +218,9 @@ services:
     env_file:
       - .env
     ports:
-      - "8091:8081" # health, debug only
+      # Off the runner 8090-8099 host range so `--scale runner=2` can claim two
+      # runner ports without colliding with this fixed sink-host debug port.
+      - "8100:8081" # health, debug only
     volumes:
       - ../../backend:/app
     depends_on:

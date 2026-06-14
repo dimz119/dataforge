@@ -153,13 +153,49 @@ jobs:
       # dataforge_app role on real Postgres (they skip on the SQLite unit lane), so
       # they ride the isolation lane. The fixture (gen_ledger_ws) seeds NO global
       # scenario, so the runtime role can create its workspace under Class-W WITH CHECK.
+      # tests/delivery is the Phase-5 delivery plane (delivery-channels §4-§5;
+      # database-schema §6.1, §9.5/§9.7) on REAL Postgres + RLS + hourly RANGE
+      # partitions — the path SQLite cannot exercise:
+      #   * tests/delivery/test_postgres — the transactional COPY into event_buffer,
+      #     per-stream monotonic buffer_seq + counter recovery, hourly partition
+      #     routing, and the RLS-negative probes (foreign/unset GUC → zero rows);
+      #   * tests/delivery/test_cursor.py — the REST cursor pull end to end over the
+      #     partitioned buffer: byte-identical REPLAY (XCH-3 / INV-DEL-3), the 410
+      #     cursor-expired logical floor AND dropped-partition (OPS-7 / INV-DEL-4,
+      #     which is Postgres-only — it reads the partition catalog), 400 invalid,
+      #     events:read enforcement, foreign-workspace 404 masking, exactly-20-key
+      #     delivered output;
+      #   * tests/delivery/test_sb3_strip_scan.py — the PERMANENT channel-parameterized
+      #     SB-3 strip scan over every shipped channel's delivered output (no _df at
+      #     any nesting; CON §8.2), run here against the real partitioned buffer so a
+      #     leak is caught on production-faithful storage.
+      # All bite only under the non-bypassing dataforge_app role on real Postgres
+      # (the partition + RLS machinery is absent on SQLite); the buffer/cursor
+      # fixtures seed no global scenario, so they ride the isolation lane.
+      # tests/tenancy auto-enrolls the new Phase-5 events route in the cross-tenant
+      # attack probe (foreign key → 404) and carries the explicit TEN §7.5(P5)
+      # data-plane probes (foreign key → 404 AND revoked-scope → 403,
+      # tests/tenancy/test_data_plane_probes_p5.py) — permanent, unskippable.
+      # NOTE: tests/streams (Phase-5 control plane: lifecycle, watchdog, maintenance)
+      # runs in the PUBLISH-PATH (owner) lane below, NOT here: its fixtures publish the
+      # e-commerce builtin as a *global* (NULL-workspace) scenario, an owner-only write
+      # (database-schema §9.6) the NOBYPASSRLS dataforge_app role cannot perform.
+      # COMPOSE-ONLY (NOT in this lane): the §8.5 kill-test / failover OPS suite
+      # (OPS-1/2 SIGKILL + takeover < 30s + fencing) and the OPS-3 stop-latency
+      # stopwatch need Kafka + two runner replicas — they run in the verify agent's
+      # compose demo (infra/scripts/demo-phase05.sh). The failover harness's pass/fail
+      # LOGIC (gap/dup scan, takeover timing, fencing, stop latency) IS gated here:
+      # tests/ops/test_failover_harness.py is pure and rides the unit lane above.
       - name: Integration tests — isolation lane (dataforge_app, RLS bites)
         env:
           DJANGO_SETTINGS_MODULE: config.settings.test_postgres
           DATABASE_URL: postgres://dataforge_app:dataforge_app@localhost:5432/dataforge
           MIGRATE_DATABASE_URL: postgres://dataforge:dataforge@localhost:5432/dataforge
           REDIS_URL: redis://localhost:6379/0
-        run: uv run pytest tests/tenancy tests/guards tests/ops tests/generation/test_postgres
+        run: >-
+          uv run pytest tests/tenancy tests/guards tests/ops
+          tests/delivery
+          tests/generation/test_postgres
       # Publish-path lane as the OWNER role: the catalog/registry publish + schema-
       # derivation + registration suites exercise the manifest-publish transaction,
       # which in production runs as the platform owner (sync_builtin_scenarios via
@@ -178,6 +214,10 @@ jobs:
       # rides the publish-path (owner) lane on real Postgres, proving the ledger
       # writes, partition routing, and download shape against the partitioned table
       # (the RLS-negative ledger probes live in the isolation lane above instead).
+      # The Phase-5 control plane (tests/streams: lifecycle T1-T13, the lease-expiry
+      # watchdog → T4/T11, the partition-maintenance beat jobs over the real ledger +
+      # hourly event_buffer partitions) likewise publishes the builtin scenario per
+      # fixture (an owner-only global write), so it rides this owner lane too.
       - name: Integration tests — publish-path lane (owner; production-faithful)
         env:
           DJANGO_SETTINGS_MODULE: config.settings.test_postgres
@@ -185,7 +225,7 @@ jobs:
           MIGRATE_DATABASE_URL: postgres://dataforge:dataforge@localhost:5432/dataforge
           REDIS_URL: redis://localhost:6379/0
         run: >-
-          uv run pytest tests/catalog tests/registry tests/contract
+          uv run pytest tests/catalog tests/registry tests/contract tests/streams
           tests/generation/test_api.py tests/generation/test_batch.py
           tests/generation/test_golden.py tests/generation/test_checkpoint_snapshot.py
 

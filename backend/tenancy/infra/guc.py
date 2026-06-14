@@ -61,6 +61,23 @@ def set_api_key_prefix_guc(key_prefix: str | None) -> None:
         cursor.execute("SELECT set_config('app.api_key_prefix', %s, true)", [value])
 
 
+def set_platform_guc(enabled: bool) -> None:
+    """SET LOCAL app.platform for the platform data-plane / pre-arm cross-tenant read.
+
+    The Class T RLS USING clause admits a row when ``app_is_platform()`` is true
+    (``app.platform = 'on'``). This is the narrow opt-in the runner data plane and
+    the flat-route workspace-resolve use to read across tenants under the NOBYPASSRLS
+    runtime role (backend-architecture §4.2 / §8.3). Transaction-local (``SET LOCAL``)
+    so it dies with the transaction; WITH CHECK is unaffected, so it never widens
+    write authority. No-op off Postgres.
+    """
+    if not _is_postgres():
+        return
+    value = "on" if enabled else ""
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT set_config('app.platform', %s, true)", [value])
+
+
 def set_request_gucs(
     *, user_id: uuid.UUID | None, workspace_id: uuid.UUID | None
 ) -> None:
@@ -74,3 +91,4 @@ def clear_request_gucs() -> None:
     set_user_guc(None)
     set_workspace_guc(None)
     set_api_key_prefix_guc(None)
+    set_platform_guc(False)

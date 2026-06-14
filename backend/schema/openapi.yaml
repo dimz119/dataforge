@@ -616,6 +616,167 @@ paths:
               schema:
                 $ref: '#/components/schemas/VersionRecord'
           description: ''
+  /api/v1/streams:
+    get:
+      operationId: streams_list
+      description: 'GET/POST /streams (api-spec §4.8 #39-40).'
+      tags:
+      - streams
+      security:
+      - apiKeyAuth: []
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/StreamResponse'
+          description: ''
+    post:
+      operationId: streams_create
+      description: 'GET/POST /streams (api-spec §4.8 #39-40).'
+      tags:
+      - streams
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StreamCreate'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/StreamCreate'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/StreamCreate'
+        required: true
+      security:
+      - apiKeyAuth: []
+      - jwtAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StreamResponse'
+          description: ''
+  /api/v1/streams/{stream_id}:
+    get:
+      operationId: streams_retrieve
+      description: |-
+        GET /streams/{stream_id} (api-spec §4.8 #41).
+
+        A flat single-resource route (W-2): the workspace is resolved from the resource.
+        The scoped manager masks a foreign stream to no-row → 404 — but the context must
+        be armed first. We resolve the stream's workspace via the unscoped manager by its
+        unique id, then verify the caller may see that workspace (foreign → 404), arm it,
+        and re-read through the scoped manager.
+      parameters:
+      - in: path
+        name: stream_id
+        schema:
+          type: string
+        required: true
+      tags:
+      - streams
+      security:
+      - apiKeyAuth: []
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StreamResponse'
+          description: ''
+  /api/v1/streams/{stream_id}/events:
+    get:
+      operationId: streams_events
+      description: GET /streams/{stream_id}/events — the REST cursor pull (api-spec
+        §4.9.1; §5).
+      parameters:
+      - in: query
+        name: cursor
+        schema:
+          type: string
+        description: Opaque resume cursor (RC-7).
+      - in: query
+        name: from
+        schema:
+          type: string
+        description: earliest | latest | RFC-3339 start position.
+      - in: query
+        name: limit
+        schema:
+          type: integer
+        description: Page size 1..1000 (default 100).
+      - in: path
+        name: stream_id
+        schema:
+          type: string
+        required: true
+      - in: query
+        name: types
+        schema:
+          type: string
+        description: Comma list, ≤20 event-type filter.
+      tags:
+      - streams
+      security:
+      - apiKeyAuth: []
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventsPage'
+          description: ''
+  /api/v1/streams/{stream_id}/start:
+    post:
+      operationId: streams_start
+      description: 'POST /streams/{stream_id}/start (api-spec §4.8.1 #43; T2/T12/T13).'
+      parameters:
+      - in: path
+        name: stream_id
+        schema:
+          type: string
+        required: true
+      tags:
+      - streams
+      security:
+      - apiKeyAuth: []
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StreamResponse'
+          description: ''
+  /api/v1/streams/{stream_id}/stop:
+    post:
+      operationId: streams_stop
+      description: 'POST /streams/{stream_id}/stop (api-spec §4.8.1 #44; T9/T10).'
+      parameters:
+      - in: path
+        name: stream_id
+        schema:
+          type: string
+        required: true
+      tags:
+      - streams
+      security:
+      - apiKeyAuth: []
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StreamResponse'
+          description: ''
   /api/v1/users/me:
     get:
       operationId: users_me_retrieve
@@ -1522,6 +1683,26 @@ components:
           type: string
       required:
       - email
+    EventsPage:
+      type: object
+      description: |-
+        The ``{data, next_cursor}`` page envelope (api-spec §2.6; §5.1).
+
+        Documentation/response shape only — the viewset builds the dict directly from the
+        service's :class:`~delivery.application.services.EventsPage` (the envelopes are
+        already delivered-shape, so no per-field serialization re-touches them).
+        ``next_cursor`` is never null on this endpoint (RC-2).
+      properties:
+        data:
+          type: array
+          items:
+            type: object
+            additionalProperties: {}
+        next_cursor:
+          type: string
+      required:
+      - data
+      - next_cursor
     InstanceCreate:
       type: object
       properties:
@@ -1851,6 +2032,113 @@ components:
       - email
       - is_verified
       - user_id
+    StreamCreate:
+      type: object
+      description: |-
+        ``POST /streams`` body (api-spec §4.8).
+
+        ``seed`` is optional (server-generated when omitted) and accepted as a string or
+        integer in [0, 2**63-1]. ``target_tps`` defaults to 10, bounded 1..1000 (the v1
+        request bound; the plan cap is a separate 403 quota check at command time).
+        ``chaos`` is the optional initial policy. v1 runs ``live`` mode only (backfill is
+        the datasets resource), so ``clock_mode`` is fixed to ``live`` here.
+      properties:
+        workspace_id:
+          type: string
+          format: uuid
+        scenario_instance_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          maxLength: 100
+          minLength: 1
+        seed:
+          type: string
+          nullable: true
+        target_tps:
+          type: integer
+          maximum: 1000
+          minimum: 1
+          default: 10
+        chaos:
+          type: object
+          additionalProperties: {}
+        virtual_clock:
+          $ref: '#/components/schemas/VirtualClockInput'
+      required:
+      - name
+      - scenario_instance_id
+      - workspace_id
+    StreamResponse:
+      type: object
+      description: |-
+        The Stream resource on the wire (api-spec §4.8). Read-only output shape.
+
+        ``status`` is the surfaced lifecycle string (``running``, ``paused_quota``, …);
+        ``status_reason`` is the raw reason. ``seed`` and ``pin_sha256`` are the
+        determinism fingerprint surfaced read-only (INV-STR-5).
+      properties:
+        stream_id:
+          type: string
+          format: uuid
+        workspace_id:
+          type: string
+          format: uuid
+        scenario_instance_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        scenario_slug:
+          type: string
+        manifest_version:
+          type: string
+        config_revision:
+          type: integer
+        pin_sha256:
+          type: string
+        seed:
+          type: string
+        status:
+          type: string
+        status_reason:
+          type: string
+        desired_state:
+          $ref: '#/components/schemas/_DesiredState'
+        virtual_clock:
+          $ref: '#/components/schemas/_VirtualClock'
+        shard_count:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        last_transition_at:
+          type: string
+          format: date-time
+          nullable: true
+      required:
+      - config_revision
+      - created_at
+      - desired_state
+      - last_transition_at
+      - manifest_version
+      - name
+      - pin_sha256
+      - scenario_instance_id
+      - scenario_slug
+      - seed
+      - shard_count
+      - started_at
+      - status
+      - status_reason
+      - stream_id
+      - virtual_clock
+      - workspace_id
     SubjectDetail:
       type: object
       description: 'Subject detail (#63): the summary plus created_at + per-version
@@ -2052,6 +2340,17 @@ components:
       - manifest_version
       - published_at
       - status
+    VirtualClockInput:
+      type: object
+      description: The optional virtual-clock block on create (api-spec §4.8 body).
+      properties:
+        virtual_epoch:
+          type: string
+          format: date-time
+        speed_multiplier:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,6}(?:\.\d{0,2})?$
     Workspace:
       type: object
       properties:
@@ -2091,6 +2390,33 @@ components:
           pattern: ^[a-z][a-z0-9-]{2,47}$
       required:
       - name
+    _DesiredState:
+      type: object
+      properties:
+        run_state:
+          type: string
+        target_tps:
+          type: integer
+      required:
+      - run_state
+      - target_tps
+    _VirtualClock:
+      type: object
+      properties:
+        virtual_epoch:
+          type: string
+          format: date-time
+        speed_multiplier:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,6}(?:\.\d{0,2})?$
+        virtual_now:
+          type: string
+          format: date-time
+          nullable: true
+      required:
+      - speed_multiplier
+      - virtual_epoch
   securitySchemes:
     apiKeyAuth:
       type: apiKey

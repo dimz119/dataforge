@@ -278,6 +278,44 @@ class ManifestValidationFailed(ProblemException):
         super().__init__(detail, extensions=extensions, **kwargs)
 
 
+# --- 400 (cursor) ----------------------------------------------------------
+class CursorInvalid(ProblemException):
+    """400 — an undecodable cursor, an unknown version prefix, or an ``f``
+    fingerprint that does not match the requested stream + filter set
+    (delivery-channels RC-8; database-schema §6.1). Distinct from expiry: the
+    cursor is structurally wrong, not merely past retention.
+    """
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    default_detail = "The cursor is malformed or does not match this stream and filter set."
+    slug = Slug.CURSOR_INVALID
+
+
+# --- 410 (cursor) ----------------------------------------------------------
+class CursorExpired(ProblemException):
+    """410 — the cursor points past the buffer retention window or into a dropped
+    partition (delivery-channels RC-10/RC-11; INV-DEL-4). The body names the
+    ``earliest_cursor`` so recovery is one request away, plus ``retention_hours``.
+    """
+
+    status_code = status.HTTP_410_GONE
+    default_detail = "Cursor expired"
+    slug = Slug.CURSOR_EXPIRED
+
+    def __init__(
+        self,
+        detail: str | None = None,
+        *,
+        earliest_cursor: str,
+        retention_hours: int,
+        **kwargs: Any,
+    ) -> None:
+        extensions = dict(kwargs.pop("extensions", {}) or {})
+        extensions["earliest_cursor"] = earliest_cursor
+        extensions["retention_hours"] = retention_hours
+        super().__init__(detail, extensions=extensions, **kwargs)
+
+
 # --- 429 -------------------------------------------------------------------
 class RateLimited(ProblemException):
     """429 — rate-limit bucket exhausted (§2.8); carries Retry-After."""
@@ -300,6 +338,8 @@ __all__ = [
     "AuthenticationFailedError",
     "AuthenticationRequired",
     "ConflictError",
+    "CursorExpired",
+    "CursorInvalid",
     "EmailNotVerified",
     "InvalidApiKey",
     "InvalidStateTransition",
