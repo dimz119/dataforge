@@ -21,6 +21,17 @@ CELERY_BROKER_URL = "memory://"
 CELERY_TASK_ALWAYS_EAGER = True
 CELERY_TASK_EAGER_PROPAGATES = True
 
+# The WS unit lane runs hermetically (no Redis): the in-process channel layer
+# (backend-architecture §10 swap) backs the WebsocketCommunicator tests and the
+# ws-pusher group_send fan-out. capacity 1000 / expiry 10 s mirror the production
+# Redis layer so the frame_seq-gap → drop_notice contract is exercised identically.
+CHANNEL_LAYERS = {
+    "default": {
+        "BACKEND": "channels.layers.InMemoryChannelLayer",
+        "CONFIG": {"capacity": 1000, "expiry": 10},
+    },
+}
+
 EMAIL_BACKEND = "django.core.mail.backends.locmem.EmailBackend"
 
 PASSWORD_HASHERS = ["django.contrib.auth.hashers.MD5PasswordHasher"]

@@ -47,6 +47,11 @@ INSTALLED_APPS = [
     "rest_framework",
     "rest_framework_simplejwt.token_blacklist",  # SEC-AUTH-9 blacklist storage
     "drf_spectacular",
+    # Phase 6: the WebSocket live tail ASGI framework (backend-architecture §10).
+    # ``channels`` registers the ASGI consumer machinery + the channel-layer
+    # backend; the ``ws`` process group (uvicorn config.asgi) serves
+    # /ws/streams/{id}/events, the REST tier stays WSGI/stateless.
+    "channels",
     "identity",
     "tenancy",
     "catalog",
@@ -144,10 +149,46 @@ if MIGRATE_DATABASE_URL:
         _migrate_db["ATOMIC_REQUESTS"] = True
         DATABASES["default"] = _migrate_db
 
+    # The ``maintenance`` alias is the owner (``dataforge_migrate``) connection the
+    # partition-maintenance beat tasks repoint onto for partition DDL
+    # (CREATE/DROP TABLE for the event_buffer hourly + ledger daily partitions —
+    # streams.tasks.maintenance / streams.infra.partition_maint, §7.1). The runtime
+    # ``default`` connection is NOBYPASSRLS and intentionally lacks DDL/role
+    # privileges, so the long-running runtime processes (runserver, uvicorn, celery
+    # worker) can never run DDL or bypass RLS (SEC-TEN-2). Partition DDL touches no
+    # tenant rows, so using the owner role here does not weaken the RLS backstop.
+    # ATOMIC_REQUESTS is off: this alias is never the request connection, and the
+    # partition helpers manage their own DDL transactions.
+    _maint_db = env.db_url("MIGRATE_DATABASE_URL")
+    _maint_db["CONN_MAX_AGE"] = 0
+    DATABASES["maintenance"] = _maint_db
+
 REDIS_URL = env.str("REDIS_URL", default="redis://redis:6379/0")
 KAFKA_BOOTSTRAP_SERVERS = env.str("KAFKA_BOOTSTRAP_SERVERS", default="kafka:9092")
 
 CELERY_BROKER_URL = REDIS_URL
+
+# --- Channels ASGI / WebSocket live tail (backend-architecture §10) ----------
+# The ``ws`` process group (uvicorn config.asgi:application) routes /ws/... to the
+# Channels consumers and everything else to the Django ASGI app (protocol
+# completeness only; user HTTP goes to ``web``). The channel layer is
+# ``channels-redis`` on the shared Redis, dedicated DB 4 (DBs 0-3 carry leases /
+# pools / stats / revocation / broker — backend-architecture §11). ``capacity``
+# 1000 / ``expiry`` 10 s per group (§10): overflow drops oldest, surfaced to
+# clients via the ``frame_seq`` gap → drop_notice mechanism (INV-DEL-5), keeping
+# the drop explicit rather than silent. ``test.py`` swaps in the in-memory layer.
+ASGI_APPLICATION = "config.asgi.application"
+WS_CHANNEL_LAYER_URL = env.str("WS_CHANNEL_LAYER_URL", default="redis://redis:6379/4")
+CHANNEL_LAYERS = {
+    "default": {
+        "BACKEND": "channels_redis.core.RedisChannelLayer",
+        "CONFIG": {
+            "hosts": [WS_CHANNEL_LAYER_URL],
+            "capacity": 1000,  # per-group frame capacity (§10)
+            "expiry": 10,  # seconds a frame lives in the layer (§10)
+        },
+    },
+}
 
 # --- Email (dev default: Mailpit capture, deployment-architecture §2.3) ------
 _email = env.email_url("EMAIL_URL", default="smtp://mailpit:1025")

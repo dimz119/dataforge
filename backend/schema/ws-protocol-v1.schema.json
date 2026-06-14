@@ -1,0 +1,312 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dataforge.dev/schema/ws-protocol-v1.schema.json",
+  "title": "DataForge WebSocket tail protocol dataforge.events.v1",
+  "description": "Frozen WS frame contract (delivery-channels §6.3; api-spec §5). Each frame type is a named $def; the close-code table and subprotocol token are pinned in x-dataforge metadata.",
+  "x-dataforge-subprotocol": "dataforge.events.v1",
+  "x-dataforge-close-codes": {
+    "1000": "normal",
+    "1001": "going_away",
+    "1011": "internal_error",
+    "1013": "overload",
+    "4400": "protocol_violation",
+    "4401": "auth_failed",
+    "4403": "forbidden",
+    "4404": "not_found",
+    "4408": "auth_timeout",
+    "4429": "quota_exceeded"
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/auth"
+    },
+    {
+      "$ref": "#/$defs/drop_notice"
+    },
+    {
+      "$ref": "#/$defs/error"
+    },
+    {
+      "$ref": "#/$defs/event"
+    },
+    {
+      "$ref": "#/$defs/heartbeat"
+    },
+    {
+      "$ref": "#/$defs/ready"
+    },
+    {
+      "$ref": "#/$defs/resume"
+    },
+    {
+      "$ref": "#/$defs/resume_ack"
+    }
+  ],
+  "$defs": {
+    "auth": {
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "const": "auth"
+        },
+        "api_key": {
+          "type": "string"
+        },
+        "access_token": {
+          "type": "string"
+        },
+        "cursor": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "types": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 20
+        },
+        "sample_rate": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "api_key"
+          ]
+        },
+        {
+          "required": [
+            "access_token"
+          ]
+        }
+      ],
+      "additionalProperties": false
+    },
+    "drop_notice": {
+      "type": "object",
+      "required": [
+        "type",
+        "dropped",
+        "resume_cursor"
+      ],
+      "properties": {
+        "type": {
+          "const": "drop_notice"
+        },
+        "dropped": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "resume_cursor": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 128
+        }
+      },
+      "additionalProperties": false
+    },
+    "error": {
+      "type": "object",
+      "required": [
+        "type",
+        "problem"
+      ],
+      "properties": {
+        "type": {
+          "const": "error"
+        },
+        "problem": {
+          "type": "object",
+          "description": "An RFC 9457 problem object (same catalog as REST)."
+        }
+      },
+      "additionalProperties": false
+    },
+    "event": {
+      "type": "object",
+      "required": [
+        "type",
+        "cursor",
+        "event"
+      ],
+      "properties": {
+        "type": {
+          "const": "event"
+        },
+        "cursor": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "event": {
+          "type": "object",
+          "description": "The delivered 20-field envelope (envelope-1.0.schema.json)."
+        }
+      },
+      "additionalProperties": false
+    },
+    "heartbeat": {
+      "type": "object",
+      "required": [
+        "type",
+        "server_time",
+        "last_cursor",
+        "delivered",
+        "dropped"
+      ],
+      "properties": {
+        "type": {
+          "const": "heartbeat"
+        },
+        "server_time": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "last_cursor": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 128
+        },
+        "delivered": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "dropped": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "ready": {
+      "type": "object",
+      "required": [
+        "type",
+        "protocol",
+        "stream_id",
+        "position",
+        "filters"
+      ],
+      "properties": {
+        "type": {
+          "const": "ready"
+        },
+        "protocol": {
+          "const": "dataforge.events.v1"
+        },
+        "stream_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "position": {
+          "type": "object",
+          "required": [
+            "cursor"
+          ],
+          "properties": {
+            "cursor": {
+              "type": "string",
+              "maxLength": 128
+            }
+          },
+          "additionalProperties": false
+        },
+        "filters": {
+          "type": "object",
+          "required": [
+            "types",
+            "sample_rate"
+          ],
+          "properties": {
+            "types": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "sample_rate": {
+              "type": "number"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "resume": {
+      "type": "object",
+      "required": [
+        "type",
+        "cursor"
+      ],
+      "properties": {
+        "type": {
+          "const": "resume"
+        },
+        "cursor": {
+          "type": "string",
+          "maxLength": 128
+        }
+      },
+      "additionalProperties": false
+    },
+    "resume_ack": {
+      "type": "object",
+      "required": [
+        "type",
+        "position",
+        "behind"
+      ],
+      "properties": {
+        "type": {
+          "const": "resume_ack"
+        },
+        "position": {
+          "type": "object",
+          "required": [
+            "cursor"
+          ],
+          "properties": {
+            "cursor": {
+              "type": "string",
+              "maxLength": 128
+            }
+          },
+          "additionalProperties": false
+        },
+        "behind": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "events": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "from_cursor": {
+              "type": "string",
+              "maxLength": 128
+            }
+          },
+          "required": [
+            "events",
+            "from_cursor"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

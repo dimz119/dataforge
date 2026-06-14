@@ -40,6 +40,7 @@ from delivery.domain.channel import (
     clamp_backpressure_ms,
 )
 from delivery.infra.buffer_store import BufferStore
+from delivery.infra.stream_stats import record_delivered_batch
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -126,6 +127,16 @@ class BufferWriterChannel:
 
         self._healthy = True
         self._health_detail = ""
+        # StreamStats: the buffer-writer is the canonical counting point (observability
+        # §5) — count exactly the rows now durable in event_buffer, AFTER the commit,
+        # so the Redis tally reconciles byte-for-byte with REST replay (the XCH exit
+        # criterion). Fails open (a Redis miss never fails a delivery; INV-OBS-2
+        # rebuildable). Runs inside the host's per-batch armed workspace context.
+        record_delivered_batch(
+            workspace_id=str(batch.workspace_id),
+            stream_id=str(batch.stream_id),
+            envelopes=delivered,
+        )
         logger.debug(
             "buffer_writer.delivered",
             stream_id=str(batch.stream_id),
