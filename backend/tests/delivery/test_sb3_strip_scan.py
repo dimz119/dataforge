@@ -87,10 +87,39 @@ def _rest_buffer_channel(armed_workspace: str, stream_id: str) -> ScannedChannel
     )
 
 
+def _websocket_channel(armed_workspace: str, stream_id: str) -> ScannedChannel:
+    """The Phase-6 ``websocket`` channel: fan via WsPusherChannel, read the frames.
+
+    The fan-out is to a fake channel layer that captures every ``group_send``; the
+    delivered output a socket would receive is each ``event`` frame's ``event`` body —
+    exactly what the SB-3 deep scan inspects for a leaked ``_df`` key.
+    """
+    captured: list[dict[str, Any]] = []
+
+    class _CaptureLayer:
+        async def group_send(self, group: str, message: dict[str, Any]) -> None:
+            captured.append(message)
+
+    def deliver(events: list[dict[str, Any]], ws_id: str, sid: str) -> None:
+        from delivery.infra.ws_pusher_channel import ChannelLayerSender, WsPusherChannel
+
+        batch = make_batch(events, workspace_id=ws_id, stream_id=sid)  # type: ignore[arg-type]
+        result = WsPusherChannel(sender=ChannelLayerSender(_CaptureLayer())).deliver(batch)
+        assert result.status == "ok", result.error
+
+    def read_delivered(sid: str) -> list[dict[str, Any]]:
+        return [dict(m["frame"]["event"]) for m in captured]
+
+    return ScannedChannel(
+        name="websocket", deliver=deliver, read_delivered=read_delivered
+    )
+
+
 # The registry of shipped channels. Phase 6 (websocket) / Phase 12 (kafka, webhook)
 # append a builder here — the parametrized test then scans them with zero new logic.
 _CHANNEL_BUILDERS: list[Callable[[str, str], ScannedChannel]] = [
     _rest_buffer_channel,
+    _websocket_channel,
 ]
 
 

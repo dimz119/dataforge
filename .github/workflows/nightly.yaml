@@ -1,0 +1,92 @@
+# DataForge nightly + attended-gate lane (testing-strategy §13, §14).
+#
+# The PR lane (ci.yaml) runs the fast/permanent gates. This workflow carries the
+# heavy profiles that are too slow for every PR but are required nightly and at the
+# phase gate runs:
+#   * PROP-RI-1..8 over the 1M-event profile (the ``property_nightly`` marker,
+#     deselected on the PR lane by the pyproject addopts);
+#   * SOAK-200 — the 1-hour 200-TPS soak (testing-strategy §13.1; phase-06 exit #5),
+#     COMPOSE-ONLY (Kafka + the ws ASGI process + the Redis channel layer + runner +
+#     sink host). It is ATTENDED at the Phase-6 gate (`make soak SOAK_MINUTES=60`)
+#     and a shorter smoke nightly; a full hour on a shared hosted runner is brittle,
+#     so the long soak is `workflow_dispatch`-gated (the verify agent / a release
+#     captain triggers it), while the nightly cron runs the short compose smoke that
+#     still exercises every threshold (RSS slope / lag / tally / staleness / errors).
+#
+# All SOAK assertion LOGIC is unit-gated on the PR lane
+# (backend/tests/ops/test_stream_control_harness.py); this lane proves it end to end
+# on the real stack.
+name: nightly
+
+on:
+  schedule:
+    - cron: "0 6 * * *" # 06:00 UTC daily
+  workflow_dispatch:
+    inputs:
+      soak_minutes:
+        description: "SOAK-200 measurement minutes (attended gate uses 60)"
+        required: false
+        default: "10"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  property-nightly:
+    name: PROP-RI (1M nightly profile)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      DJANGO_SETTINGS_MODULE: config.settings.test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - name: Sync dependencies
+        run: uv sync
+      # The 1M PROP-RI profile + the golden replay (incl. GOLD-D continuation) — the
+      # nightly + attended Phase-4/6 gate. ``-m property_nightly`` overrides the
+      # default addopts deselection; ``golden`` re-runs the byte-identity gates.
+      - name: PROP-RI 1M + golden replay (nightly)
+        run: uv run pytest -m "property_nightly or golden" -q
+
+  soak200:
+    name: SOAK-200 (compose; attended/nightly)
+    runs-on: ubuntu-latest
+    # The nightly cron runs a short compose smoke; the attended Phase-6 gate run
+    # (workflow_dispatch with soak_minutes=60) is the binding 1-hour profile.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - name: Install websocat (the independent WS tail consumer)
+        run: |
+          curl -fsSL -o /usr/local/bin/websocat \
+            https://github.com/vi/websocat/releases/latest/download/websocat.x86_64-unknown-linux-musl
+          chmod +x /usr/local/bin/websocat
+      - name: Prepare compose env
+        run: cp infra/compose/.env.example infra/compose/.env
+      - name: Bring up the full stack (Kafka + ws + Redis channel layer + runner + sinks)
+        run: docker compose -f infra/compose/compose.yaml up -d --wait
+      # The driver bootstraps auth/stream the Phase-2 way inside the demo; here we run
+      # the demo-phase06 soak step only (it creates the 200-TPS SEED_SOAK stream and
+      # invokes soak200.py). The cron uses the short smoke; the dispatch input sets
+      # the gate-run minutes. demo-phase06.sh exits non-zero on any threshold breach.
+      - name: SOAK-200 (demo-phase06 soak step)
+        env:
+          SOAK_MINUTES: ${{ github.event.inputs.soak_minutes || '10' }}
+        run: infra/scripts/demo-phase06.sh --no-up --soak-minutes=${SOAK_MINUTES}
+      - name: Dump compose logs on failure
+        if: failure()
+        run: docker compose -f infra/compose/compose.yaml logs --no-color | tail -n 400
+      - name: Tear down
+        if: always()
+        run: docker compose -f infra/compose/compose.yaml down -v

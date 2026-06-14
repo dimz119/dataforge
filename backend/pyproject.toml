@@ -25,6 +25,15 @@ dependencies = [
     "gunicorn>=23.0",
     "uvicorn[standard]>=0.30",
     "whitenoise>=6.7",
+    # Phase 6: the WebSocket live tail (delivery-channels §6; backend-architecture
+    # §10). ``channels`` is the ASGI consumer framework that serves
+    # ``/ws/streams/{id}/events`` on the dedicated ``ws`` process group;
+    # ``channels-redis`` is the Redis-backed channel layer the ws-pusher sink fans
+    # frames into (``group_send("stream_{id}", frame)``) and the per-connection
+    # consumers subscribe to. Both are required by the §6.1 fan-out topology and the
+    # §6 frame contract; the engine stays free of them (import-linter contract 2).
+    "channels>=4.1",
+    "channels-redis>=4.2",
 ]
 
 [dependency-groups]
@@ -54,6 +63,11 @@ dev = [
     # published E7 queries (row count, orders→users FK join match, daily revenue).
     # Test-lane only — the engine + delivery path never import it.
     "duckdb>=1.0",
+    # Phase 6 WS tests: the Channels test harness (``channels.testing`` →
+    # ``WebsocketCommunicator``) imports ``daphne`` at the package level for its
+    # live-server case. Daphne is the canonical Channels ASGI server; test-lane only
+    # (production serves the ``ws`` group with uvicorn, backend-architecture §10).
+    "daphne>=4.1",
 ]
 
 [tool.uv]
@@ -100,6 +114,14 @@ ignore_errors = true
 
 [[tool.mypy.overrides]]
 module = ["confluent_kafka", "confluent_kafka.*", "environ", "environ.*"]
+ignore_missing_imports = true
+
+# Phase 6: Channels (the WS ASGI framework) ships no type stubs (types-channels is
+# incomplete/unmaintained for 4.x). The consumer + ws-pusher reach it through the
+# narrow seams (ChannelLayerSender, the AsyncJsonWebsocketConsumer base) so the
+# untyped surface is small and contained.
+[[tool.mypy.overrides]]
+module = ["channels", "channels.*", "daphne", "daphne.*"]
 ignore_missing_imports = true
 
 # The audit writer (`audit.application.writer.record_audit`) is owned by the
