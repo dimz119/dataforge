@@ -665,13 +665,19 @@ paths:
     get:
       operationId: streams_retrieve
       description: |-
-        GET /streams/{stream_id} (api-spec §4.8 #41).
+        GET | PATCH /streams/{stream_id} (api-spec §4.8 #41, §4.8.2 #47).
 
         A flat single-resource route (W-2): the workspace is resolved from the resource.
         The scoped manager masks a foreign stream to no-row → 404 — but the context must
         be armed first. We resolve the stream's workspace via the unscoped manager by its
         unique id, then verify the caller may see that workspace (foreign → 404), arm it,
         and re-read through the scoped manager.
+
+        ``PATCH`` is the live mutation surface (§4.8.2): ``name``/``target_tps`` only
+        (PIN-3). ``target_tps`` is bounded 1..1,000 (out of range → 400) and quota-capped
+        at command time (above the plan per-stream cap → 403, INV-TEN-5); the runner picks
+        it up within 2 s. Any other body key names a pinned field (PIN-4) → 400
+        validation-error with ``errors[0].code = "immutable_field"``.
       parameters:
       - in: path
         name: stream_id
@@ -680,6 +686,51 @@ paths:
         required: true
       tags:
       - streams
+      security:
+      - apiKeyAuth: []
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StreamResponse'
+          description: ''
+    patch:
+      operationId: streams_patch
+      description: |-
+        GET | PATCH /streams/{stream_id} (api-spec §4.8 #41, §4.8.2 #47).
+
+        A flat single-resource route (W-2): the workspace is resolved from the resource.
+        The scoped manager masks a foreign stream to no-row → 404 — but the context must
+        be armed first. We resolve the stream's workspace via the unscoped manager by its
+        unique id, then verify the caller may see that workspace (foreign → 404), arm it,
+        and re-read through the scoped manager.
+
+        ``PATCH`` is the live mutation surface (§4.8.2): ``name``/``target_tps`` only
+        (PIN-3). ``target_tps`` is bounded 1..1,000 (out of range → 400) and quota-capped
+        at command time (above the plan per-stream cap → 403, INV-TEN-5); the runner picks
+        it up within 2 s. Any other body key names a pinned field (PIN-4) → 400
+        validation-error with ``errors[0].code = "immutable_field"``.
+      parameters:
+      - in: path
+        name: stream_id
+        schema:
+          type: string
+        required: true
+      tags:
+      - streams
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedStreamPatch'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedStreamPatch'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedStreamPatch'
       security:
       - apiKeyAuth: []
       - jwtAuth: []
@@ -733,6 +784,64 @@ paths:
               schema:
                 $ref: '#/components/schemas/EventsPage'
           description: ''
+  /api/v1/streams/{stream_id}/pause:
+    post:
+      operationId: streams_pause
+      description: |-
+        POST /streams/{stream_id}/pause (api-spec §4.8.1 #45; T5).
+
+        Idempotent (INV-STR-3): pause on a paused-desired stream is a no-op returning
+        current state. Guarded: pause is legal only from a live lifecycle
+        (``running``/``starting``/``resuming``) — else 409 invalid-state-transition (T5).
+        Always an explicit user pause here (``status_reason = user``); the quota/idle
+        system-pause TRIGGERS are Phase 11 (the lifecycle Celery handler calls
+        ``request_pause(reason=...)`` directly, not this route).
+      parameters:
+      - in: path
+        name: stream_id
+        schema:
+          type: string
+        required: true
+      tags:
+      - streams
+      security:
+      - apiKeyAuth: []
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StreamResponse'
+          description: ''
+  /api/v1/streams/{stream_id}/resume:
+    post:
+      operationId: streams_resume
+      description: |-
+        POST /streams/{stream_id}/resume (api-spec §4.8.1 #46; T7).
+
+        Idempotent (INV-STR-3): resume on a running-desired stream is a no-op. Guarded:
+        resume is legal only from ``paused``/``pausing`` — else 409. If the pause reason
+        was ``quota`` (Phase 11), restored headroom is required at command time
+        (INV-TEN-5) → else 403 quota-exceeded (T7).
+      parameters:
+      - in: path
+        name: stream_id
+        schema:
+          type: string
+        required: true
+      tags:
+      - streams
+      security:
+      - apiKeyAuth: []
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StreamResponse'
+          description: ''
   /api/v1/streams/{stream_id}/start:
     post:
       operationId: streams_start
@@ -754,6 +863,36 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/StreamResponse'
+          description: ''
+  /api/v1/streams/{stream_id}/stats:
+    get:
+      operationId: streams_stats
+      description: |-
+        GET /streams/{stream_id}/stats (api-spec §4.11.1 #55; T-none, Phase 6).
+
+        The tenant-facing StreamStats read: Redis-resident, rebuildable counters
+        (``total_events``, ``observed_tps``, ``by_event_type``, ``last_event_at``) with
+        staleness ≤ 5 s (INV-OBS-2), workspace-scoped (INV-OBS-3). JWT or API-key
+        (``streams:read``); a foreign-workspace credential masks to 404 (W-1/W-3) via the
+        shared resolver. ``health`` is derived from the runner lease (heartbeat-fresh
+        ≤ 15 s) + the counters' age (§4.11.1).
+      parameters:
+      - in: path
+        name: stream_id
+        schema:
+          type: string
+        required: true
+      tags:
+      - streams
+      security:
+      - apiKeyAuth: []
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StreamStatsResponse'
           description: ''
   /api/v1/streams/{stream_id}/stop:
     post:
@@ -1703,6 +1842,16 @@ components:
       required:
       - data
       - next_cursor
+    HealthEnum:
+      enum:
+      - healthy
+      - degraded
+      - stale
+      type: string
+      description: |-
+        * `healthy` - healthy
+        * `degraded` - degraded
+        * `stale` - stale
     InstanceCreate:
       type: object
       properties:
@@ -1837,6 +1986,9 @@ components:
       - role
       - slug
       - workspace_id
+    NullEnum:
+      enum:
+      - null
     PasswordResetConfirmRequest:
       type: object
       properties:
@@ -1854,6 +2006,26 @@ components:
       properties:
         role:
           $ref: '#/components/schemas/RoleEnum'
+    PatchedStreamPatch:
+      type: object
+      description: |-
+        ``PATCH /streams/{id}`` body (api-spec §4.8.2; RFC 7386 merge-patch).
+
+        Mutable fields: ``name`` and ``target_tps`` (PIN-3). ``target_tps`` is bounded
+        1..1,000 (out of range → 400 ``validation-error``); the plan per-stream cap is a
+        separate 403 ``quota-exceeded`` check at command time (INV-TEN-5). Everything else
+        on the stream is pinned (PIN-4) — patching an immutable field is rejected with a
+        ``validation-error`` whose ``errors[0].code = "immutable_field"`` (handled in the
+        view, which masks unknown/pinned keys before serializer validation).
+      properties:
+        name:
+          type: string
+          maxLength: 100
+          minLength: 1
+        target_tps:
+          type: integer
+          maximum: 1000
+          minimum: 1
     PatchedWorkspaceRename:
       type: object
       properties:
@@ -2139,6 +2311,61 @@ components:
       - stream_id
       - virtual_clock
       - workspace_id
+    StreamStatsResponse:
+      type: object
+      description: |-
+        The ``GET /streams/{id}/stats`` response (api-spec §4.11.1, Phase 6).
+
+        Redis-resident, rebuildable counters (INV-OBS-2): ``total_events``,
+        ``observed_tps`` (10 s sliding window), ``by_event_type``, ``last_event_at``.
+        ``health`` is the closed enum (``healthy``/``degraded``/``stale``), ``null`` for a
+        non-live stream. The shape is assembled by the delivery stats service; this
+        serializer is the OpenAPI/output contract.
+      properties:
+        stream_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+        health:
+          nullable: true
+          oneOf:
+          - $ref: '#/components/schemas/HealthEnum'
+          - $ref: '#/components/schemas/NullEnum'
+        total_events:
+          type: integer
+        observed_tps:
+          type: number
+          format: double
+        target_tps:
+          type: integer
+        last_event_at:
+          type: string
+          format: date-time
+          nullable: true
+        by_event_type:
+          type: object
+          additionalProperties:
+            type: integer
+        buffer:
+          $ref: '#/components/schemas/_StatsBuffer'
+        virtual_clock:
+          $ref: '#/components/schemas/_StatsVirtualClock'
+        as_of:
+          type: string
+          format: date-time
+      required:
+      - as_of
+      - buffer
+      - by_event_type
+      - health
+      - last_event_at
+      - observed_tps
+      - status
+      - stream_id
+      - target_tps
+      - total_events
+      - virtual_clock
     SubjectDetail:
       type: object
       description: 'Subject detail (#63): the summary plus created_at + per-version
@@ -2400,6 +2627,36 @@ components:
       required:
       - run_state
       - target_tps
+    _StatsBuffer:
+      type: object
+      properties:
+        earliest_available_at:
+          type: string
+          format: date-time
+          nullable: true
+        latest_event_at:
+          type: string
+          format: date-time
+          nullable: true
+        retention_hours:
+          type: integer
+      required:
+      - earliest_available_at
+      - latest_event_at
+      - retention_hours
+    _StatsVirtualClock:
+      type: object
+      properties:
+        virtual_now:
+          type: string
+          format: date-time
+          nullable: true
+        speed_multiplier:
+          type: number
+          format: double
+      required:
+      - speed_multiplier
+      - virtual_now
     _VirtualClock:
       type: object
       properties:

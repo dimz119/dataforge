@@ -32,6 +32,7 @@ logger = structlog.get_logger("dataforge.runner.sinks.consumer")
 
 __all__ = [
     "REST_BUFFER_GROUP",
+    "WEBSOCKET_GROUP",
     "ConsumerMessage",
     "KafkaConsumer",
     "TopicPartitionOffset",
@@ -42,6 +43,14 @@ __all__ = [
 # naming owned by backend-architecture §8.6). One group over the single delivery
 # topic; MVP = 1 instance, Phase 11 scales by internal partition assignment.
 REST_BUFFER_GROUP = "df.sink.rest-buffer.v1"
+
+# The platform-wide ws-pusher consumer group (delivery-channels §6.1; naming owned
+# by backend-architecture §8.6). One group over the single delivery topic; fans
+# stripped events to the Redis channel-layer group ``stream_{stream_id}`` with a
+# per-stream monotonic ``frame_seq``. A separate group from the buffer-writer so the
+# two sinks consume the topic independently (one binding's lag never stalls the
+# other, §3.5 isolation).
+WEBSOCKET_GROUP = "df.sink.websocket.v1"
 
 
 @runtime_checkable

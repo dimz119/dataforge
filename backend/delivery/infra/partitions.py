@@ -125,12 +125,19 @@ def create_partition_sql(hour: datetime) -> list[str]:
 def drop_partition_sql(hour: datetime) -> list[str]:
     """DDL to detach-then-drop one hourly partition (§8.2 step 2; §4.3 retention).
 
-    Detach keeps the parent lockless for readers, then drop. ``IF EXISTS`` makes
-    the drop idempotent.
+    Detach keeps the parent lockless for readers, then drop. Fully idempotent: the
+    DETACH runs only when the partition is still attached (Postgres has no
+    ``DETACH PARTITION IF EXISTS``, so a ``pg_inherits`` guard stands in), and the
+    DROP uses ``IF EXISTS``. Re-running over an already-retired hour is a no-op.
     """
     name = partition_name(hour)
     return [
-        f"ALTER TABLE {BUFFER_TABLE} DETACH PARTITION {name};",
+        "DO $$ BEGIN "
+        f"IF EXISTS (SELECT 1 FROM pg_inherits "
+        f"WHERE inhparent = '{BUFFER_TABLE}'::regclass "
+        f"AND inhrelid = to_regclass('{name}')) THEN "
+        f"ALTER TABLE {BUFFER_TABLE} DETACH PARTITION {name}; "
+        "END IF; END $$;",
         f"DROP TABLE IF EXISTS {name};",
     ]
 

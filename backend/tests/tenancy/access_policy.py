@@ -176,6 +176,18 @@ ACCESS_POLICY: dict[tuple[str, str], RouteClass] = {
     ("GET", "/api/v1/streams/{stream_id}"): RouteClass.SCOPE,
     ("POST", "/api/v1/streams/{stream_id}/start"): RouteClass.SCOPE,
     ("POST", "/api/v1/streams/{stream_id}/stop"): RouteClass.SCOPE,
+    # Phase 6 control-plane verbs (api-spec §4.8.1 #45-46, §4.8.2 #47): dual JWT|
+    # Key(streams:write); the stream's owning workspace masks foreign access to 404
+    # for both credential types (W-1/W-3). No credential → 401. SCOPE captures
+    # foreign_jwt→404, foreign_key→404, no_cred→401 — identical to start/stop.
+    ("POST", "/api/v1/streams/{stream_id}/pause"): RouteClass.SCOPE,
+    ("POST", "/api/v1/streams/{stream_id}/resume"): RouteClass.SCOPE,
+    ("PATCH", "/api/v1/streams/{stream_id}"): RouteClass.SCOPE,
+    # Phase 6 stats read (api-spec §4.11.1 #55): dual JWT|Key(streams:read); the
+    # stream's owning workspace masks foreign access to 404 for both credential
+    # types (W-1/W-3 — TEN P6 "foreign stats → 404"). No credential → 401. SCOPE
+    # captures foreign_jwt→404, foreign_key→404, no_cred→401 — identical to GET {id}.
+    ("GET", "/api/v1/streams/{stream_id}/stats"): RouteClass.SCOPE,
     # --- Delivery: REST cursor pull (api-spec §4.9.1; delivery-channels §5) ---
     # Dual JWT|Key(events:read) data-plane read over event_buffer; the stream's
     # owning workspace masks foreign access to 404 for both credential types (W-1/

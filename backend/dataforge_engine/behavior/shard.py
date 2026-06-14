@@ -133,10 +133,16 @@ class Shard:
         return self._arrival
 
     def set_arrival_state(self, state: object) -> None:
-        """Replace the arrival integrator position (checkpoint restore, §9.3)."""
+        """Replace the arrival integrator position (checkpoint restore, §9.3).
+
+        Rebases the arrival gap-draw cursor to the restored ``next_index`` — the
+        cursor position is a derivable invariant (one draw per arrival), so a fresh
+        restored shard must re-anchor it or the next inter-arrival gap diverges
+        (GOLD-D continuation correctness)."""
         from .scheduler import ArrivalState
         if isinstance(state, ArrivalState):
             self._arrival.state = state
+            self._arrival.rebase_cursor()
 
     def ensure_registered(self) -> None:
         """Register all entity types + relationships from the IR (idempotent).
@@ -157,6 +163,34 @@ class Shard:
     def restore_sequence(self, last: int) -> None:
         """Resume the gapless ``sequence_no`` counter (checkpoint restore)."""
         self._sequence.reset_to(last)
+
+    def set_target_tps(self, target_tps: float) -> None:
+        """Adopt a new live ``target_tps`` (the §4.4 live-mutable slot; BE-P2).
+
+        The runner calls this each tick from the polled desired state. ``target_tps``
+        feeds ``_rho`` (sessions per simulated second, §3.5), so the next scheduled
+        arrival integrates at the new density — the engine-side half of a TPS change;
+        the runner's token bucket adopts the matching wall-rate the same tick. Content
+        stays TPS-independent (BE-P4): per-session draws are keyed by traversal
+        identity, the rate only changes *which* arrivals occur and *when* in simulated
+        time. The full recorded-schedule step function with `effective_virtual_at`
+        anchors (BE-P1/P3 — intensity curves, multi-entry pruning) lands in Phase 8;
+        the live-mutable slot and the determinism input exist now.
+        """
+        self._config.target_tps = float(target_tps)
+
+    def reopen_clock_segment(self, wall_now: datetime) -> None:
+        """Re-anchor the virtual clock at ``(wall_now, frontier_us)`` (resume, §9.3 step 4).
+
+        The pause froze the clock at the generation frontier ``F`` (no segment
+        advances while idling). On resume the runner opens a fresh segment anchored to
+        the resumed wall instant, so ``virtual_now`` continues from ``F`` — and dwell
+        timers, which store *absolute* virtual due-times, are thereby rebased to the
+        frozen-then-resumed virtual clock with no per-timer recomputation. In-flight
+        funnels continue with zero ``sequence_no`` gaps (T8): nothing about a traversal
+        lived outside the warm in-memory state held across the pause.
+        """
+        self._vclock.open_segment(wall_now)
 
     # -- seeding (§4.5) -----------------------------------------------------
 

@@ -107,17 +107,44 @@ jobs:
             exit 1
           fi
       # Permanent gates, fail-fast (testing-strategy §6, §4.1, §17.3): the GOLD-A
-      # byte-identity replay against the committed fixture and the PROP-RI-1..8
-      # referential-integrity suite over the 100k PR profile. Both are pure engine
-      # + ports (no Postgres/Redis), so they run here in the fast lane and gate the
-      # PR before the DB lanes. The 1M ``property_nightly`` profile is NOT run here
-      # (too slow; nightly + attended Phase-4 gate only) — it is excluded by the
-      # pyproject ``addopts`` markexpr and never selected on this PR lane.
-      - name: GOLD-A replay + PROP-RI (100k PR profile)
+      # byte-identity replay against the committed fixture, GOLD-D stop/restart
+      # continuation byte-identity (Phase-6 exit #2 — restore-from-checkpoint
+      # reproduces an uninterrupted run, with PROP-RI over the restarted stream),
+      # and the PROP-RI-1..8 referential-integrity suite over the 100k PR profile.
+      # All are pure engine + ports (no Postgres/Redis), so they run here in the
+      # fast lane and gate the PR before the DB lanes. The 1M ``property_nightly``
+      # profile is NOT run here (too slow; nightly + attended Phase-4 gate only) —
+      # it is excluded by the pyproject ``addopts`` markexpr and never selected here.
+      - name: GOLD-A/GOLD-D replay + PROP-RI (100k PR profile)
         run: uv run pytest -m "golden or property" -q
       # UNIT lane: in-memory SQLite, hermetic and fast (testing-strategy §2). The
       # default ``addopts`` deselects ``property_nightly``; this run also re-covers
       # golden/property/OPS-11 hermetically alongside the rest of the unit suite.
+      # Phase 6: the WS tail unit tests (tests/delivery/test_ws_*.py) ride here —
+      # they use the in-memory channel layer + faked revocation cache (no live Redis,
+      # no Kafka, no daphne server), covering subprotocol negotiation / the close-code
+      # table / auth → ready → event / resume_ack / frame_seq-gap drop_notice / the
+      # drop-oldest queue / the ws-pusher fan-out.
+      #
+      # Also gated here (pure, CI-gated; the live round-trips are compose-only):
+      #   * tests/ops/test_stream_control_harness.py — the OPS-5 (dynamic-TPS
+      #     stopwatch), OPS-8 (WS drop-notice reconciliation + bounded memory),
+      #     XCH content-equality, and SOAK-200 (RSS-slope / lag-p99 / tally /
+      #     staleness) assertion LOGIC. The soak driver + demo import the SAME
+      #     functions, so the compose verdict == the PR-lane verdict.
+      #   * tests/delivery/test_xch_cross_channel.py — XCH-1/2 proven at the channel
+      #     seam: the same envelopes through the ws-pusher fan-out vs the REST-
+      #     delivered (strip_internal) shape, reconciled per event_id (no broker).
+      #
+      # COMPOSE-ONLY (NOT in any CI lane — the verify agent's demo-phase06.sh +
+      # the attended/nightly soak): the LIVE OPS-4 pause/resume one-tick halt +
+      # checkpoint + lease retention round-trip, the LIVE OPS-5 TPS stopwatch on a
+      # running runner, the LIVE OPS-8 WS backpressure against a throttled socket,
+      # the LIVE XCH 60s WS-tail vs REST-cursor harness, and SOAK-200 (1-hour
+      # 200-TPS; ws process + Redis channel layer + Kafka + runner + sink host).
+      # Their pass/fail LOGIC is the unit-gated harness above; the runner-side
+      # OPS-4 tick semantics are gated by tests/runner/test_pause_resume.py +
+      # tests/runner/test_resume_continuity.py (also in this lane).
       - name: Tests (pytest, unit lane)
         run: uv run pytest
       # Phase-4 Layer-3 GUARD (plugin-arch §8.4; phase exit criterion #4): every
@@ -176,6 +203,13 @@ jobs:
       # attack probe (foreign key → 404) and carries the explicit TEN §7.5(P5)
       # data-plane probes (foreign key → 404 AND revoked-scope → 403,
       # tests/tenancy/test_data_plane_probes_p5.py) — permanent, unskippable.
+      # Phase 6 grows the suite: the new control-plane verbs (pause/resume/PATCH)
+      # and the stats read are classified in access_policy so the route-coverage gate
+      # and the cross-tenant probe auto-enroll them (foreign → 404); the explicit
+      # TEN §7.5(P6) probes (tests/tenancy/test_data_plane_probes_p6.py: foreign
+      # stats → 404 over key AND JWT, own-key control, WS-3 4404 close-code pin) are
+      # permanent gates. tests/delivery now also carries the XCH-1/2 channel-seam
+      # harness (test_xch_cross_channel.py) — WS-pusher vs REST content equality.
       # NOTE: tests/streams (Phase-5 control plane: lifecycle, watchdog, maintenance)
       # runs in the PUBLISH-PATH (owner) lane below, NOT here: its fixtures publish the
       # e-commerce builtin as a *global* (NULL-workspace) scenario, an owner-only write
@@ -192,10 +226,22 @@ jobs:
           DATABASE_URL: postgres://dataforge_app:dataforge_app@localhost:5432/dataforge
           MIGRATE_DATABASE_URL: postgres://dataforge:dataforge@localhost:5432/dataforge
           REDIS_URL: redis://localhost:6379/0
+        # tests/delivery rides the RLS lane for the Postgres-bearing paths (COPY,
+        # cursor replay, stats RLS, the SB-3 strip scan, the XCH channel-seam, and the
+        # Phase-6 WS cold-cache auth GUC-in-transaction probe under tests/delivery/
+        # test_postgres). The async WebSocket *consumer/protocol* suites
+        # (test_ws_consumer/test_ws_protocol/test_ws_pusher) are channel-layer +
+        # protocol-behavior tests on the in-memory layer — fully covered in the fast
+        # unit lane above; they are NOT RLS-bearing, and the WebsocketCommunicator +
+        # transaction=True + background-task model is fragile against the Postgres test
+        # DB, so they are deselected here (ignored), not re-run on Postgres.
         run: >-
           uv run pytest tests/tenancy tests/guards tests/ops
           tests/delivery
           tests/generation/test_postgres
+          --ignore tests/delivery/test_ws_consumer.py
+          --ignore tests/delivery/test_ws_protocol.py
+          --ignore tests/delivery/test_ws_pusher.py
       # Publish-path lane as the OWNER role: the catalog/registry publish + schema-
       # derivation + registration suites exercise the manifest-publish transaction,
       # which in production runs as the platform owner (sync_builtin_scenarios via
@@ -283,10 +329,16 @@ jobs:
         run: uv run python manage.py generate_envelope_schema --check
       - name: Fail on manifest-v0 schema artifact drift (§9.1)
         run: uv run python manage.py generate_manifest_schema --check
+      # Phase 6: the WS frame JSON Schema (delivery-channels §6.3; api-spec §5.5, T-3)
+      # is the committed contract for the dataforge.events.v1 protocol. WS frames are
+      # out of OpenAPI scope by design (T-7); this artifact + the cross-channel suite
+      # carry the contract. `--check` fails the build if the committed file drifts.
+      - name: Fail on ws-protocol-v1 schema artifact drift (§5.5)
+        run: uv run python manage.py generate_ws_protocol_schema --check
       # Belt-and-suspenders: assert the on-disk artifacts equal the generators
       # even if a future change skips the management-command path.
       - name: Schema artifacts match the working tree
-        run: git diff --exit-code -- schema/envelope-1.0.schema.json catalog/schema/manifest-v0.schema.json
+        run: git diff --exit-code -- schema/envelope-1.0.schema.json catalog/schema/manifest-v0.schema.json schema/ws-protocol-v1.schema.json
 
   folder-lint:
     name: folder-lint

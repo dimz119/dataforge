@@ -3,8 +3,9 @@
 Mounted under /api/v1 by config.urls. Flat collection + single-resource routes
 (W-2): the collection route takes ``workspace_id`` from the query/body (JWT) or the
 key; the single-resource route resolves the workspace from the stream. Phase 5
-mounts create/list/retrieve + the idempotent start/stop verbs; the remaining verbs
-(pause/resume/PATCH/chaos/delete/events) land in their phases.
+mounts create/list/retrieve + the idempotent start/stop verbs; Phase 6 adds the
+pause/resume verbs (#45-46, T5/T7) and the live ``PATCH`` mutation (#47, target_tps).
+The chaos/delete/events verbs land in their phases.
 """
 
 from django.urls import path
@@ -23,5 +24,20 @@ urlpatterns = [
         "streams/<str:stream_id>/stop",
         viewsets.StreamStopView.as_view(),
         name="stream-stop",
+    ),
+    path(
+        "streams/<str:stream_id>/pause",
+        viewsets.StreamPauseView.as_view(),
+        name="stream-pause",
+    ),
+    path(
+        "streams/<str:stream_id>/resume",
+        viewsets.StreamResumeView.as_view(),
+        name="stream-resume",
+    ),
+    path(
+        "streams/<str:stream_id>/stats",
+        viewsets.StreamStatsView.as_view(),
+        name="stream-stats",
     ),
 ]

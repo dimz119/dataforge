@@ -12,9 +12,14 @@ adapters (backend-architecture §3.1, application layer). Three responsibilities
 * **mark_failed** (T4/T11) — the watchdog's terminal transition: no lease within the
   failover window → ``failed`` with ``status_reason = error``/``failover_exhausted``.
 
-Pause/resume FULL semantics are Phase 6 (checkpoint-on-pause, dynamic TPS, WS); the
-desired-state write for pause/resume is here as a thin pass-through so the API
-surface is complete, but the convergence is stubbed at the runner (Phase 6).
+* **pause / resume** (T5/T7, idempotent INV-STR-3) — write the *desired* run-state
+  ``paused``/``running`` + ``status_reason`` {user|quota|idle|error} + audit. The
+  runner converges (T6 checkpoint-on-pause holding warm state; T8 restore + dwell
+  rebase). System pauses (quota/idle TRIGGERS) land Phase 11; the ``status_reason``
+  plumbing that renders ``paused_quota``/``paused_idle`` exists now (T5 reason arg).
+* **set_target_tps** (PATCH, PIN-3 live mutation) — write the *desired* ``target_tps``
+  (1-1000, quota-capped at command time INV-TEN-5) + audit; the runner picks it up on
+  the next desired-state poll → effective ≤ 2 s (the Phase 6 exit criterion).
 """
 
 from __future__ import annotations
@@ -31,6 +36,10 @@ from streams.application import audit, quotas
 from streams.domain.models import (
     LC_CREATED,
     LC_FAILED,
+    LC_PAUSED,
+    LC_PAUSING,
+    LC_RESUMING,
+    LC_RUNNING,
     LC_STARTING,
     LC_STOPPED,
     LC_STOPPING,
@@ -38,7 +47,9 @@ from streams.domain.models import (
     MVP_SHARD_ID,
     REASON_ERROR,
     REASON_FAILOVER_EXHAUSTED,
+    REASON_IDLE,
     REASON_NONE,
+    REASON_QUOTA,
     REASON_USER,
     RUN_PAUSED,
     RUN_RUNNING,
@@ -47,19 +58,28 @@ from streams.domain.models import (
     StreamShard,
 )
 
+# The status_reason values a pause may carry (domain-model §4.3 T5; rendered as
+# paused_quota/paused_idle by Stream.status). user = explicit user pause; quota/idle
+# = system TRIGGERS (Phase 11) — the reason plumbing exists now.
+PAUSE_REASONS: frozenset[str] = frozenset({REASON_USER, REASON_QUOTA, REASON_IDLE, REASON_ERROR})
+
 # The R-3 seed domain (api-spec §4.8): [0, 2**63 - 1].
 _SEED_MAX = (2**63) - 1
 
 __all__ = [
     "PinDeprecated",
     "StreamCreateInput",
+    "StreamNotPausable",
+    "StreamNotResumable",
     "StreamNotStartable",
     "StreamQuotaExceeded",
     "create_stream",
     "generate_seed",
     "mark_failed",
     "request_pause",
+    "request_rename",
     "request_resume",
+    "request_set_target_tps",
     "request_start",
     "request_stop",
 ]
@@ -77,6 +97,22 @@ class StreamNotStartable(Exception):
 
     Start is legal only from ``created``/``stopped``/``failed`` (api-spec §4.8.1);
     e.g. ``start`` while ``pausing`` → 409 invalid-state-transition.
+    """
+
+
+class StreamNotPausable(Exception):
+    """A pause was issued from a non-pausable state (409, T5 guard, api-spec §4.8.1).
+
+    Pause is legal only from ``running`` (or already ``pausing``/``paused`` →
+    idempotent no-op). Pausing a ``created``/``stopped``/``failed`` stream is illegal.
+    """
+
+
+class StreamNotResumable(Exception):
+    """A resume was issued from a non-resumable state (409, T7 guard, api-spec §4.8.1).
+
+    Resume is legal only from ``paused``/``pausing`` (or already ``running``/``resuming``
+    → idempotent no-op). Resuming a stream that is not paused is illegal.
     """
 
 
@@ -316,59 +352,152 @@ def request_stop(*, stream: Stream, actor: Any) -> Stream:
     return stream
 
 
-def request_pause(*, stream: Stream, actor: Any) -> Stream:
-    """T5: set desired = paused (idempotent INV-STR-3).
+# Pause is legal from these lifecycle states (T5; api-spec §4.8.1 "from running").
+# A stream already pausing/paused short-circuits to the idempotent no-op below.
+_PAUSABLE_FROM = frozenset({LC_RUNNING, LC_STARTING, LC_RESUMING})
+# Resume is legal from these lifecycle states (T7; api-spec §4.8.1 "from paused*").
+_RESUMABLE_FROM = frozenset({LC_PAUSED, LC_PAUSING})
 
-    Phase 6 owns the FULL pause semantics (checkpoint-on-pause holding state, T6
-    convergence). Phase 5 writes the desired-state + audit so the API surface is
-    complete; the runner's pause branch holds the lease and halts (a minimal stub,
-    backend-architecture §8.3 "Phase 6"). Idempotent: pause on a paused-desired
-    stream is a no-op.
+
+def request_pause(
+    *, stream: Stream, actor: Any, reason: str = REASON_USER
+) -> Stream:
+    """T5: set desired = paused; runner converges (T6) — idempotent (INV-STR-3).
+
+    The control plane writes desired ``paused`` + ``status_reason`` and audits; the
+    runner halts emission within one tick, persists a checkpoint synchronously, holds
+    the lease, and reports ``paused`` (T6). Idempotent: pause on a paused-desired
+    stream is a silent no-op returning current state. Guarded: pause is legal only
+    from a live lifecycle (``running``/``starting``/``resuming``) — pausing a
+    ``created``/``stopped``/``failed`` stream → :class:`StreamNotPausable` (409).
+
+    ``reason`` is the §4.3 T5 status_reason: ``user`` (explicit user pause) renders
+    plain ``paused``; ``quota``/``idle`` (system TRIGGERS, Phase 11) render
+    ``paused_quota``/``paused_idle`` via :pyattr:`Stream.status`. System pauses audit
+    (the call carries ``actor="system"``).
     """
+    if reason not in PAUSE_REASONS:
+        reason = REASON_USER
     if stream.desired_state == RUN_PAUSED:
-        return stream  # INV-STR-3 no-op
+        return stream  # INV-STR-3 no-op: already paused-desired
+    if stream.lifecycle_state not in _PAUSABLE_FROM:
+        raise StreamNotPausable(
+            f"pause is illegal from lifecycle state {stream.lifecycle_state!r} "
+            f"(legal only from running/starting/resuming; T5)"
+        )
     now = timezone.now()
     with transaction.atomic():
         stream.desired_state = RUN_PAUSED
-        stream.status_reason = REASON_USER
+        stream.lifecycle_state = LC_PAUSING  # nudge → pausing; runner converges to paused (T6)
+        stream.status_reason = reason
         stream.last_transition_at = now
         stream.updated_at = now
         stream.save(
             update_fields=[
                 "desired_state",
+                "lifecycle_state",
                 "status_reason",
                 "last_transition_at",
                 "updated_at",
             ]
         )
-        _audit_lifecycle("streams.stream.pause_requested", stream, actor)
+        _audit_lifecycle("streams.stream.pause_requested", stream, actor, extra={"reason": reason})
     return stream
 
 
 def request_resume(*, stream: Stream, actor: Any) -> Stream:
-    """T7: set desired = running from a paused state (idempotent INV-STR-3).
+    """T7: set desired = running from a paused state; runner converges (T8) — idempotent.
 
-    Phase 6 owns FULL resume (checkpoint restore, dwell rebase, T8). Phase 5 writes
-    the desired-state + audit. Idempotent: resume on a running-desired stream is a
-    no-op.
+    The control plane writes desired ``running`` (clearing the pause reason) + audits;
+    the runner restores actor/session machines from the checkpoint, rebases dwell
+    timers to the resumed virtual clock, and continues in-flight funnels with zero
+    ``sequence_no`` gaps (T8). Idempotent: resume on a running-desired stream is a
+    silent no-op. Guarded: resume is legal only from ``paused``/``pausing`` →
+    :class:`StreamNotResumable` (409) otherwise. If the pause reason was ``quota``,
+    the quota-headroom guard (T7) applies — checked here at command time (INV-TEN-5).
     """
     if stream.desired_state == RUN_RUNNING:
-        return stream  # INV-STR-3 no-op
+        return stream  # INV-STR-3 no-op: already running-desired
+    if stream.lifecycle_state not in _RESUMABLE_FROM:
+        raise StreamNotResumable(
+            f"resume is illegal from lifecycle state {stream.lifecycle_state!r} "
+            f"(legal only from paused/pausing; T7)"
+        )
+    if stream.status_reason == REASON_QUOTA:
+        # T7 quota guard: resuming a quota-paused stream requires restored headroom.
+        quotas.check_start_allowed(stream)
     now = timezone.now()
     with transaction.atomic():
         stream.desired_state = RUN_RUNNING
+        stream.lifecycle_state = LC_RESUMING  # nudge → resuming; runner converges to running (T8)
         stream.status_reason = REASON_NONE
         stream.last_transition_at = now
         stream.updated_at = now
         stream.save(
             update_fields=[
                 "desired_state",
+                "lifecycle_state",
                 "status_reason",
                 "last_transition_at",
                 "updated_at",
             ]
         )
         _audit_lifecycle("streams.stream.resume_requested", stream, actor)
+    return stream
+
+
+def request_set_target_tps(*, stream: Stream, target_tps: int, actor: Any) -> Stream:
+    """PATCH live mutation: set desired ``target_tps`` (PIN-3, quota-capped INV-TEN-5).
+
+    Writes the desired ``target_tps`` (the live-mutable §4.4 slot) + audits; the
+    runner's token bucket adopts the new wall-rate and the engine re-integrates the
+    next arrival at the new density on the next desired-state poll → effective ≤ 2 s
+    (the Phase 6 exit criterion). The recorded value is the determinism input
+    (behavior-engine §3.6 BE-P4): replays of the same stream read the same schedule
+    and stay byte-identical.
+
+    The serializer bounds the value 1..1,000 (out of range → 400 upstream). The
+    *plan* per-stream TPS cap is checked here at command time (INV-TEN-5) → a value
+    above the cap raises :class:`StreamQuotaExceeded` (403). Idempotent: setting the
+    current ``target_tps`` is a silent no-op returning current state (INV-STR-3 in
+    spirit — re-issuing the current desired value).
+    """
+    cap = quotas.per_stream_tps_cap(stream.workspace_id)
+    if target_tps > cap:
+        raise quotas.StreamQuotaExceeded(
+            quota="per_stream_tps", limit=cap, requested=target_tps
+        )
+    if stream.target_tps == target_tps:
+        return stream  # no-op: re-issuing the current desired target_tps
+    now = timezone.now()
+    with transaction.atomic():
+        previous = stream.target_tps
+        stream.target_tps = target_tps
+        stream.updated_at = now
+        stream.save(update_fields=["target_tps", "updated_at"])
+        _audit_lifecycle(
+            "streams.stream.target_tps_changed",
+            stream,
+            actor,
+            extra={"target_tps": target_tps, "previous_target_tps": previous},
+        )
+    return stream
+
+
+def request_rename(*, stream: Stream, name: str, actor: Any) -> Stream:
+    """PATCH the stream ``name`` (a non-pinned label; api-spec §4.8.2). Idempotent.
+
+    ``name`` is a free-form label, not part of the determinism pin (PIN-4), so it is
+    mutable at any lifecycle state. Idempotent: setting the current name is a no-op.
+    """
+    if stream.name == name:
+        return stream
+    now = timezone.now()
+    with transaction.atomic():
+        stream.name = name
+        stream.updated_at = now
+        stream.save(update_fields=["name", "updated_at"])
+        _audit_lifecycle("streams.stream.renamed", stream, actor, extra={"name": name})
     return stream
 
 

@@ -96,6 +96,36 @@ def test_restore_continuation_is_byte_identical() -> None:
     assert ref_rows == first + rest
 
 
+def test_restore_rebases_arrival_cursor_to_next_index() -> None:
+    """Restore re-anchors the arrival gap-draw cursor to ``next_index`` (§9.3).
+
+    The arrival cursor consumes exactly one draw per arrival, so its position is the
+    derivable invariant ``cursor.position == arrival.next_index``. The checkpoint blob
+    records ``next_index`` but not the cursor position; a fresh restored shard builds
+    the cursor at position 0, so restore MUST rebase it — otherwise the next
+    inter-arrival gap is drawn at the wrong RNG position and the arrival schedule
+    (hence every downstream session) silently diverges. This pins the rebase so the
+    GOLD-D continuation defect (a restart producing a different arrival ordering than
+    an uninterrupted run) cannot regress. Drives some arrivals, checkpoints, restores
+    into a fresh shard, and asserts the cursor position equals the restored index."""
+    shard = _make()
+    shard.run_batch(until_us=_MID)
+    # The invariant must already hold on the live shard.
+    live_pos = shard.arrival._cursor.position
+    advanced_index = shard.arrival.state.next_index
+    assert live_pos == advanced_index
+    assert advanced_index > 0  # arrivals actually fired (the test is not vacuous)
+
+    blob = json.loads(json.dumps(encode_checkpoint(shard, checkpoint_seq=1)))
+    resumed = _make()
+    _copy_pools(shard, resumed)
+    assert resumed.arrival._cursor.position == 0  # fresh cursor before restore
+    restore_checkpoint(resumed, blob)
+    # After restore the cursor is rebased to the restored index — not left at 0.
+    assert resumed.arrival.state.next_index == advanced_index
+    assert resumed.arrival._cursor.position == advanced_index
+
+
 def test_pin_echo_mismatch_refused() -> None:
     shard = _make(seed=11)
     shard.run_batch(until_us=_MID)

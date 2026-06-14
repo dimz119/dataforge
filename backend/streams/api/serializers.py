@@ -69,6 +69,23 @@ class StreamCreateSerializer(serializers.Serializer[Any]):
         return seed
 
 
+class StreamPatchSerializer(serializers.Serializer[Any]):
+    """``PATCH /streams/{id}`` body (api-spec §4.8.2; RFC 7386 merge-patch).
+
+    Mutable fields: ``name`` and ``target_tps`` (PIN-3). ``target_tps`` is bounded
+    1..1,000 (out of range → 400 ``validation-error``); the plan per-stream cap is a
+    separate 403 ``quota-exceeded`` check at command time (INV-TEN-5). Everything else
+    on the stream is pinned (PIN-4) — patching an immutable field is rejected with a
+    ``validation-error`` whose ``errors[0].code = "immutable_field"`` (handled in the
+    view, which masks unknown/pinned keys before serializer validation).
+    """
+
+    name = serializers.CharField(min_length=1, max_length=100, required=False)
+    target_tps = serializers.IntegerField(
+        required=False, min_value=_TPS_MIN, max_value=_TPS_MAX
+    )
+
+
 class _DesiredStateSerializer(serializers.Serializer[Any]):
     run_state = serializers.CharField()
     target_tps = serializers.IntegerField()
@@ -105,3 +122,39 @@ class StreamResponseSerializer(serializers.Serializer[Any]):
     created_at = serializers.DateTimeField()
     started_at = serializers.DateTimeField(allow_null=True)
     last_transition_at = serializers.DateTimeField(allow_null=True)
+
+
+class _StatsBufferSerializer(serializers.Serializer[Any]):
+    earliest_available_at = serializers.DateTimeField(allow_null=True)
+    latest_event_at = serializers.DateTimeField(allow_null=True)
+    retention_hours = serializers.IntegerField()
+
+
+class _StatsVirtualClockSerializer(serializers.Serializer[Any]):
+    virtual_now = serializers.DateTimeField(allow_null=True)
+    speed_multiplier = serializers.FloatField()
+
+
+class StreamStatsResponseSerializer(serializers.Serializer[Any]):
+    """The ``GET /streams/{id}/stats`` response (api-spec §4.11.1, Phase 6).
+
+    Redis-resident, rebuildable counters (INV-OBS-2): ``total_events``,
+    ``observed_tps`` (10 s sliding window), ``by_event_type``, ``last_event_at``.
+    ``health`` is the closed enum (``healthy``/``degraded``/``stale``), ``null`` for a
+    non-live stream. The shape is assembled by the delivery stats service; this
+    serializer is the OpenAPI/output contract.
+    """
+
+    stream_id = serializers.UUIDField()
+    status = serializers.CharField()
+    health = serializers.ChoiceField(
+        choices=["healthy", "degraded", "stale"], allow_null=True
+    )
+    total_events = serializers.IntegerField()
+    observed_tps = serializers.FloatField()
+    target_tps = serializers.IntegerField()
+    last_event_at = serializers.DateTimeField(allow_null=True)
+    by_event_type = serializers.DictField(child=serializers.IntegerField())
+    buffer = _StatsBufferSerializer()
+    virtual_clock = _StatsVirtualClockSerializer()
+    as_of = serializers.DateTimeField()

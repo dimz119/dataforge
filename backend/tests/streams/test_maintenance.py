@@ -42,3 +42,36 @@ def test_buffer_partition_manager_seam_resolves() -> None:
     assert mgr is not None
     assert hasattr(mgr, "ensure_partitions")
     assert hasattr(mgr, "drop_partition")
+
+
+_postgres_only = pytest.mark.skipif(
+    connection.vendor != "postgresql",
+    reason="partition DDL (create/drop, DETACH guard) is a Postgres construct.",
+)
+
+
+@_postgres_only
+@pytest.mark.django_db
+def test_buffer_drop_partition_is_idempotent(db: object) -> None:
+    """``drop_partition`` is a no-op on an absent/already-dropped hour (Phase-6 fix).
+
+    Postgres has no ``DETACH PARTITION IF EXISTS``; the pre-fix DDL ran an unguarded
+    DETACH, so the hourly maintenance beat raised
+    ``relation "..." does not exist`` when its retention-drop targeted an hour whose
+    partition was never created (a fresh DB past the create-ahead window). The
+    ``pg_inherits`` guard makes a double-drop / absent-hour drop a clean no-op. This
+    runs in the owner lane (``tests/streams``), which holds the DDL privilege the
+    maintenance task uses via the ``maintenance`` alias in production.
+    """
+    from datetime import UTC, datetime
+
+    from delivery.infra import partitions
+
+    hour = datetime(2031, 7, 4, 13, tzinfo=UTC)  # far-future, unused hour
+    with connection.cursor() as cursor:
+        partitions.create_partition(cursor, hour)
+        partitions.drop_partition(cursor, hour)  # first drop: detaches + drops
+        # Second drop over the now-absent partition must NOT raise (idempotent).
+        partitions.drop_partition(cursor, hour)
+        # A drop over an hour that was never created must also be a clean no-op.
+        partitions.drop_partition(cursor, datetime(2031, 7, 4, 14, tzinfo=UTC))

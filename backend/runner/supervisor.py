@@ -126,11 +126,13 @@ class Supervisor:
         self._last_beat = time.monotonic()
         self._last_scan = 0.0
         self._ready = False
-        # The §8.6 sink host (buffer-writer) runs in a daemon thread when the role
-        # includes sinks — it is a blocking Kafka consumer loop, not an asyncio task,
-        # and holds no Redis lease (the broker's group coordinator does that work).
-        self._sink_host: Any = None
-        self._sink_thread: Any = None
+        # The §8.6 sink hosts (buffer-writer + ws-pusher) each run in a daemon thread
+        # when the role includes sinks — each is a blocking Kafka consumer loop, not an
+        # asyncio task, and holds no Redis lease (the broker's group coordinator does
+        # that work). Both consume df.delivery.events.v1 in separate consumer groups so
+        # one sink's lag never stalls the other (§3.5 isolation).
+        self._sink_hosts: list[Any] = []
+        self._sink_threads: list[Any] = []
 
     @property
     def runs_generation(self) -> bool:
@@ -342,7 +344,7 @@ class Supervisor:
         site = web.TCPSite(http, host="0.0.0.0", port=HEALTH_PORT)
         await site.start()
         if self.runs_sinks:
-            self._start_sink_host()
+            self._start_sink_hosts()
         logger.info(
             "runner.boot",
             role=self.role,
@@ -354,43 +356,57 @@ class Supervisor:
         finally:
             await self._shutdown(http)
 
-    def _start_sink_host(self) -> None:
-        """Start the §8.6 buffer-writer sink host in a daemon thread (--role sinks).
+    def _start_sink_hosts(self) -> None:
+        """Start the §8.6 sink hosts in daemon threads (--role sinks).
 
-        The host is a blocking Kafka consumer-group loop (``df.sink.rest-buffer.v1``)
-        that strip_internal()s at ingest and COPYs into the hourly-partitioned
-        event_buffer, committing offsets AFTER the insert (INV-DEL-3). It holds no
-        Redis lease (§8.6) — the broker coordinates the group — so it lives in a
-        thread, not the asyncio lease loop. Failures are logged; the supervisor's
-        health stays liveness-only for the sinks role.
+        Two platform-shared sinks consume ``df.delivery.events.v1`` in separate
+        consumer groups (§8.6):
+
+        * **buffer-writer** (``df.sink.rest-buffer.v1``): strip_internal()s at ingest
+          and COPYs into the hourly-partitioned event_buffer, committing offsets AFTER
+          the insert (INV-DEL-3);
+        * **ws-pusher** (``df.sink.websocket.v1``): strip_internal()s, stamps a
+          per-stream ``frame_seq``, and ``group_send``s to the channel-layer group
+          ``stream_{stream_id}`` for the live tail (§6.1), acking immediately
+          (at-most-once).
+
+        Each is a blocking Kafka consumer-group loop holding no Redis lease (§8.6) —
+        the broker coordinates the group — so each lives in its own thread, not the
+        asyncio lease loop. Failures are logged; health stays liveness-only.
         """
         import threading
 
         from runner.sinks.run import build_buffer_writer_host
+        from runner.sinks.ws_run import build_ws_pusher_host
 
-        self._sink_host = build_buffer_writer_host(client_id=self.runner_id)
-
-        def _run() -> None:
-            try:
-                self._sink_host.start()
-            except Exception as exc:  # pragma: no cover - thread guard
-                logger.error("sink_host.crashed", error=str(exc))
-
-        self._sink_thread = threading.Thread(
-            target=_run, name="buffer-writer-host", daemon=True
+        builders = (
+            ("buffer-writer-host", build_buffer_writer_host),
+            ("ws-pusher-host", build_ws_pusher_host),
         )
-        self._sink_thread.start()
-        logger.info("sink_host.started", role=self.role, runner_id=self.runner_id)
+        for name, build in builders:
+            host = build(client_id=self.runner_id)
+            self._sink_hosts.append(host)
+
+            def _run(host: Any = host, name: str = name) -> None:
+                try:
+                    host.start()
+                except Exception as exc:  # pragma: no cover - thread guard
+                    logger.error("sink_host.crashed", host=name, error=str(exc))
+
+            thread = threading.Thread(target=_run, name=name, daemon=True)
+            thread.start()
+            self._sink_threads.append(thread)
+            logger.info("sink_host.started", host=name, role=self.role)
 
     async def _shutdown(self, http: web.AppRunner) -> None:
         """Cancel workers, release leases, close connections, stop the listener."""
         self._ready = False
-        if self._sink_host is not None:
+        for host in self._sink_hosts:
             with contextlib.suppress(Exception):
-                self._sink_host.stop()
-            if self._sink_thread is not None:
-                with contextlib.suppress(Exception):
-                    self._sink_thread.join(timeout=5.0)
+                host.stop()
+        for thread in self._sink_threads:
+            with contextlib.suppress(Exception):
+                thread.join(timeout=5.0)
         for shard in list(self._workers):
             await self._cancel_worker(shard, reason="shutdown")
         if self._leases is not None:

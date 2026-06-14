@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from dataforge_engine.behavior import Shard, ShardConfig, compile_manifest
+from dataforge_engine.behavior.checkpoint import encode_checkpoint, restore_checkpoint
 from dataforge_engine.envelope import canonical_serialize
 from dataforge_engine.manifest import merge_overlay, parse_manifest_text
 from generation.infra.clock import DeterministicWallClock
@@ -128,6 +129,118 @@ def build_batch(
         seeded_keys=seeded_keys,
         seed=seed,
         overlay=overlay or {},
+    )
+
+
+def build_batch_with_restart(
+    *,
+    seed: int,
+    stop_after: int,
+    total_events: int,
+    overlay: dict[str, Any] | None = None,
+    simulated_days: int = SIMULATED_DAYS,
+    pass_size: int = 500,
+) -> BatchResult:
+    """Drive the engine to ``stop_after`` events, checkpoint, then RESTART a fresh
+    :class:`Shard` from that checkpoint and continue to ``total_events`` — the
+    GOLD-D stop/restart continuation harness (testing-strategy §6, §189; T12).
+
+    This mirrors the runner's §9.3 failover/resume restore exactly, in the pure
+    engine lane (no Postgres/Redis): encode the §9.1 checkpoint blob + capture the
+    per-type pool images in memory at the stop point, build a NEW shard at the same
+    pin, reload the pool images (``reindex_loaded``, §9.3 step 2), then
+    ``restore_checkpoint`` (heap, cursors, arrival integrator, sequence counter,
+    traversals, vclock — §9.3 steps 3-4). Generation continues from the rehydrated
+    state. The concatenation of the two segments is the restarted run; GOLD-D
+    asserts its canonical *content* is byte-identical to an uninterrupted
+    ``total_events`` run (INV-STR-5, "resume with zero sequence gaps").
+
+    The wall clock is carried across the restart so the restored segment continues
+    stamping from where the first segment left off — but ``emitted_at`` is still a
+    pass-schedule artifact (``generate`` calls ``now()`` once per pass), so GOLD-D
+    compares the wall-free :func:`content_only` projection, exactly as the §7.4
+    determinism-boundary test does.
+    """
+    document = merged_ecommerce_document(overlay)
+
+    def _config() -> ShardConfig:
+        return ShardConfig(
+            seed=seed,
+            workspace_id=WORKSPACE_ID,
+            stream_id=STREAM_ID,
+            shard_id=0,
+            virtual_epoch=VIRTUAL_EPOCH,
+            mode="backfill",
+            mean_events_per_session=_MEAN_EVENTS_PER_SESSION,
+            visits_per_actor_day=_VISITS_PER_ACTOR_DAY,
+        )
+
+    # --- Segment 1: run to the stop point under a deterministic wall clock. -----
+    ir = compile_manifest(document)
+    clock = DeterministicWallClock(epoch=WALL_EPOCH)
+    shard = Shard(ir, _config(), clock)
+    head = shard.seed()
+    seeded_keys: dict[str, set[str]] = {}
+    for entity_type in ir.entity_order:
+        seeded_keys[entity_type] = set(shard.pools.pool(entity_type).records)
+    first = shard.run_batch(
+        max_events=stop_after, until_us=simulated_days * _US_PER_DAY, pass_size=pass_size
+    )
+    segment_one = [*head, *first]
+
+    # --- Checkpoint: encode the codec blob + snapshot the live pool images. -----
+    checkpoint_seq = 1
+    blob = encode_checkpoint(shard, checkpoint_seq=checkpoint_seq)
+    pool_images: dict[str, list[dict[str, Any]]] = {}
+    for entity_type in ir.entity_order:
+        pool = shard.pools.pool(entity_type)
+        pool_images[entity_type] = [pool.records[k].snapshot_json() for k in pool.records]
+
+    # --- Segment 2: a brand-new shard restored from the checkpoint (§9.3). ------
+    # A fresh IR + a fresh shard prove nothing leaks from the first instance; the
+    # wall clock is carried forward (the runner keeps stamping monotonically).
+    ir2 = compile_manifest(document)
+    shard2 = Shard(ir2, _config(), clock)
+    shard2.ensure_registered()
+    for entity_type, images in pool_images.items():
+        for image in images:
+            shard2.pools.reindex_loaded(
+                _pooled_entity_from_image(entity_type, image)
+            )
+    restore_checkpoint(shard2, blob)
+    second = shard2.run_batch(
+        max_events=total_events - len(segment_one),
+        until_us=simulated_days * _US_PER_DAY,
+        pass_size=pass_size,
+    )
+    return BatchResult(
+        envelopes=[*segment_one, *second],
+        seeded_keys=seeded_keys,
+        seed=seed,
+        overlay=overlay or {},
+    )
+
+
+def _pooled_entity_from_image(entity_type: str, image: dict[str, Any]) -> Any:
+    """Rebuild a ``PooledEntity`` from its ``snapshot_json`` image (§9.3 step 2).
+
+    The pure-engine inverse of :meth:`PooledEntity.snapshot_json`, mirroring the
+    runner's ``checkpoint_store._pooled_entity_from_image`` so GOLD-D restores the
+    pools the same way failover does — without any Django/DB seam.
+    """
+    from typing import cast
+
+    from dataforge_engine.behavior.pools import EntityStatus, PooledEntity
+
+    return PooledEntity(
+        entity_key=str(image["entity_key"]),
+        entity_type=entity_type,
+        attributes=dict(image["attributes"]),
+        entity_version=int(image["entity_version"]),
+        created_at=str(image["created_at"]),
+        updated_at=str(image["updated_at"]),
+        status=cast("EntityStatus", str(image.get("status", "live"))),
+        in_session=bool(image.get("in_session", False)),
     )
 
 

@@ -113,6 +113,19 @@ class ArrivalProcess:
         self._cursor = cursor
         self.state = state or ArrivalState()
 
+    def rebase_cursor(self) -> None:
+        """Re-anchor the gap-draw cursor to the restored ``next_index`` (§9.3 restore).
+
+        The arrival cursor consumes exactly one exponential-gap draw per arrival
+        (``next_arrival_us`` advances the cursor and ``next_index`` in lockstep), so
+        ``cursor.position`` is an invariant equal to ``state.next_index``. The
+        checkpoint blob records ``next_index`` but not the cursor position (it is
+        derivable, §9.1 "RNG cursor positions"); a restored shard builds a *fresh*
+        cursor at position 0, so restore MUST rebase it here or the next inter-arrival
+        gap is drawn at the wrong position — silently diverging the arrival schedule
+        and thus every downstream session (the GOLD-D continuation defect)."""
+        self._cursor.position = self.state.next_index
+
     def next_arrival_us(self, rho: float) -> int | None:
         """The next arrival's virtual µs at constant density ``rho``, or ``None``.
 
