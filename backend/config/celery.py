@@ -41,6 +41,35 @@ app.conf.task_routes = {
     # Phase 4: the Layer-3 dry-run validation job rides the validation queue
     # (plugin-arch §8.4; backend-architecture §7.1).
     "catalog.validate_manifest_l3": {"queue": "validation"},
+    # Phase 5: Stream Control lifecycle supervision (lifecycle queue, §7.1).
+    "streams.lease_expiry_watchdog": {"queue": "lifecycle"},
+    "streams.system_pause_stream": {"queue": "lifecycle"},
+    "streams.fail_stream": {"queue": "lifecycle"},
+    # Phase 5: partition maintenance (maintenance queue, §7.1; ADR-0013 retention).
+    "streams.maintain_ledger_partitions": {"queue": "maintenance"},
+    "streams.maintain_buffer_partitions": {"queue": "maintenance"},
+}
+
+# Beat schedule (control plane only; backend-architecture §7.1, §7.4). The beat
+# scheduler runs inside the worker group under a Redis singleton lock (§7.4) so
+# scaling worker machines never double-fires. Phase 5 schedules:
+#   - the lease-expiry watchdog (T4/T11) on a tight cadence so a stuck start fails
+#     within the 60 s window (domain-model §4.3);
+#   - event_buffer hourly partition create/drop (database-schema §6.1, 24 h);
+#   - ground_truth_ledger daily partition create/drop (database-schema §5.5, 7 d).
+app.conf.beat_schedule = {
+    "streams-lease-expiry-watchdog": {
+        "task": "streams.lease_expiry_watchdog",
+        "schedule": 15.0,  # every 15 s (lease TTL); detects no-lease within the window
+    },
+    "streams-maintain-buffer-partitions": {
+        "task": "streams.maintain_buffer_partitions",
+        "schedule": 3600.0,  # hourly (event_buffer hourly partitions, §6.1)
+    },
+    "streams-maintain-ledger-partitions": {
+        "task": "streams.maintain_ledger_partitions",
+        "schedule": 86400.0,  # daily (ground_truth_ledger daily partitions, §5.5)
+    },
 }
 
 app.autodiscover_tasks(related_name="tasks")

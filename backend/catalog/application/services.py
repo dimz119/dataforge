@@ -237,9 +237,7 @@ def _revalidate_overlay(manifest: dict[str, Any], overlay: dict[str, Any]) -> No
 def _instance_has_live_streams(instance_id: UUID) -> bool:
     """True iff a non-deleted stream references this instance (streams seam, Phase 5)."""
     try:
-        from streams.application.reader import (  # type: ignore[import-not-found]
-            instance_has_live_streams,
-        )
+        from streams.application.reader import instance_has_live_streams
     except ImportError:
         return False  # Phase-3 build: the streams reader seam lands in Phase 5
     return bool(instance_has_live_streams(instance_id))

@@ -39,6 +39,13 @@ dev = [
     "import-linter>=2.1",
     "pytest>=8.3",
     "pytest-django>=4.9",
+    # Phase 5 runner lease unit (backend-architecture §8.2): the supervisor is an
+    # asyncio program, so the lease tests are async. ``fakeredis`` provides an
+    # in-process Redis (incl. ``redis.asyncio`` + server-side Lua/``eval``) so the
+    # lease/fencing unit runs in the fast PR lane without a live Redis service; the
+    # live-Redis variants run in the verify agent's compose demo.
+    "pytest-asyncio>=0.24",
+    "fakeredis[lua]>=2.26",
     # Property/invariant lane (testing-strategy §17.1): the PROP-SM-* validator and
     # registry mutation oracles. Pure-Python; no runtime dependency.
     "hypothesis>=6.100",
@@ -111,6 +118,9 @@ django_settings_module = "config.settings.test"
 [tool.pytest.ini_options]
 DJANGO_SETTINGS_MODULE = "config.settings.test"
 python_files = ["test_*.py"]
+# Phase 5 runner lease tests are async (the supervisor is an asyncio program,
+# §8.1); ``auto`` mode lets bare ``async def test_*`` run without per-test markers.
+asyncio_mode = "auto"
 # ``property_nightly`` (the 1M PROP-RI profile, ~90 s) is deselected by default so
 # the PR/unit lane stays fast; it runs only when explicitly selected
 # (``-m property_nightly``) on the nightly + attended Phase-4 gate lane. The 100k

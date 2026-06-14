@@ -41,6 +41,25 @@ DROP FUNCTION IF EXISTS app_workspace_id();
 DROP FUNCTION IF EXISTS app_user_id();
 """
 
+# backend-architecture §4.2 / §8.3 — the platform-read accessor. The runner data
+# plane is a platform process spanning EVERY workspace's shards: its per-tick
+# claimable scan and per-shard desired/checkpoint reads cross tenants by design
+# (INV-STR-6), and the flat single-resource API routes must resolve a resource's
+# owning workspace BEFORE any workspace context can be armed. Both are pre-context
+# cross-tenant SELECTs that the strict Class T `workspace_id = app_workspace_id()`
+# policy hides from the NOBYPASSRLS runtime role. ``app.platform`` is a narrow,
+# transaction-local opt-in (mirroring the ``app.api_key_prefix`` auth-bootstrap
+# precedent) honoured ONLY by the Class T USING (read) clause — WITH CHECK stays
+# strictly workspace-scoped, so writes still require a real armed workspace and
+# cross-tenant writes remain impossible. Set exclusively by trusted platform code
+# (``guc.set_platform_guc`` via ``platform_read_scope``); no data endpoint sets it.
+_CREATE_PLATFORM_ACCESSOR = """
+CREATE OR REPLACE FUNCTION app_is_platform() RETURNS boolean
+    LANGUAGE sql STABLE PARALLEL SAFE
+    AS $$ SELECT coalesce(current_setting('app.platform', true), '') = 'on' $$;
+"""
+_DROP_PLATFORM_ACCESSOR = "DROP FUNCTION IF EXISTS app_is_platform();"
+
 _ENABLE = (
     'ALTER TABLE "{t}" ENABLE ROW LEVEL SECURITY;\n'
     'ALTER TABLE "{t}" FORCE ROW LEVEL SECURITY;'
@@ -50,10 +69,14 @@ _DISABLE = (
     'ALTER TABLE "{t}" DISABLE ROW LEVEL SECURITY;'
 )
 
-# Class T — standard tenant table (database-schema §9.5).
+# Class T — standard tenant table (database-schema §9.5). The USING (read) clause
+# also admits the platform data plane (backend-architecture §4.2 / §8.3): the
+# runner's cross-tenant claimable scan + the flat-route pre-arm workspace resolve.
+# WITH CHECK stays strictly workspace-scoped — platform reads can never become
+# cross-tenant writes (a write still requires a real armed workspace).
 _POLICY_T = """
 CREATE POLICY tenant_isolation ON "{t}" FOR ALL
-    USING (workspace_id = app_workspace_id())
+    USING (workspace_id = app_workspace_id() OR app_is_platform())
     WITH CHECK (workspace_id = app_workspace_id());
 """
 # Class W — workspaces (PK is the tenant id; own-workspace listing via memberships).
@@ -102,11 +125,17 @@ _DROP_POLICY = {
 
 
 class CreateGucAccessors(migrations.RunSQL):
-    """Create the null-safe ``app_workspace_id()`` / ``app_user_id()`` functions."""
+    """Create the null-safe ``app_workspace_id()`` / ``app_user_id()`` functions.
+
+    Also creates ``app_is_platform()`` (backend-architecture §4.2) so a fresh DB
+    has the platform-read accessor the Class T USING clause references.
+    """
 
     def __init__(self) -> None:
         super().__init__(
-            sql=_CREATE_ACCESSORS, reverse_sql=_DROP_ACCESSORS, elidable=False
+            sql=_CREATE_ACCESSORS + _CREATE_PLATFORM_ACCESSOR,
+            reverse_sql=_DROP_PLATFORM_ACCESSOR + _DROP_ACCESSORS,
+            elidable=False,
         )
 
     def database_forwards(
@@ -158,3 +187,48 @@ class EnableRowLevelSecurity(migrations.RunSQL):
 
     def describe(self) -> str:
         return f"Enable+force RLS (class {self.policy_class}) on {self.table}"
+
+
+# Forward: add app_is_platform() + recreate the Class T tenant_isolation policy
+# with the platform-read branch. Reverse: restore the strict workspace-only policy
+# and drop the accessor. Used by the alter migration that retrofits already-RLS'd
+# Class T tables (backend-architecture §4.2).
+_POLICY_T_STRICT = """
+CREATE POLICY tenant_isolation ON "{t}" FOR ALL
+    USING (workspace_id = app_workspace_id())
+    WITH CHECK (workspace_id = app_workspace_id());
+"""
+
+
+class AddPlatformReadToClassT(migrations.RunSQL):
+    """Retrofit the platform-read branch onto an already-installed Class T policy.
+
+    Creates the ``app_is_platform()`` accessor (idempotent) and recreates the
+    ``tenant_isolation`` policy on ``table`` so its USING clause admits the platform
+    data plane (``app_is_platform()``) in addition to the row's own workspace. WITH
+    CHECK is unchanged (strictly workspace-scoped). No-op off Postgres.
+    """
+
+    def __init__(self, *, table: str) -> None:
+        self.table = table
+        drop = f'DROP POLICY IF EXISTS tenant_isolation ON "{table}";\n'
+        forward = _CREATE_PLATFORM_ACCESSOR + "\n" + drop + _POLICY_T.format(t=table)
+        reverse = drop + _POLICY_T_STRICT.format(t=table)
+        super().__init__(sql=forward, reverse_sql=reverse, elidable=False)
+
+    def database_forwards(
+        self, app_label: str, schema_editor: Any, from_state: ProjectState, to_state: ProjectState
+    ) -> None:
+        if schema_editor.connection.vendor != "postgresql":
+            return
+        super().database_forwards(app_label, schema_editor, from_state, to_state)
+
+    def database_backwards(
+        self, app_label: str, schema_editor: Any, from_state: ProjectState, to_state: ProjectState
+    ) -> None:
+        if schema_editor.connection.vendor != "postgresql":
+            return
+        super().database_backwards(app_label, schema_editor, from_state, to_state)
+
+    def describe(self) -> str:
+        return f"Add platform-read branch to Class T policy on {self.table}"

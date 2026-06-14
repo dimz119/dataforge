@@ -66,6 +66,32 @@ def worker_workspace_scope(workspace_id: uuid.UUID | None) -> Iterator[None]:
             guc.set_workspace_guc(None)
 
 
+@contextmanager
+def platform_read_scope() -> Iterator[None]:
+    """Arm the platform-read GUC for a cross-tenant pre-context SELECT (§4.2 / §8.3).
+
+    Two trusted platform paths read rows BEFORE any workspace can be armed:
+
+    * the runner data plane — its per-tick claimable scan + per-shard desired/
+      checkpoint reads span every workspace's shards (INV-STR-6); and
+    * the flat single-resource API routes — they must resolve a resource's owning
+      workspace from its unique id before they can arm the scoped context.
+
+    Both are hidden by the strict Class T policy under the NOBYPASSRLS runtime role.
+    This opens one ``transaction.atomic()`` (the GUC is ``SET LOCAL``, so it must
+    live inside a transaction on the ORM connection), sets ``app.platform = 'on'``,
+    and clears it on exit. It widens READ visibility only — WITH CHECK stays
+    workspace-scoped, so a write inside this scope still requires a real armed
+    workspace and can never cross tenants.
+    """
+    with transaction.atomic():
+        guc.set_platform_guc(True)
+        try:
+            yield
+        finally:
+            guc.set_platform_guc(False)
+
+
 def _arm_user_for_membership_read(user: User) -> None:
     """Arm ``app.user_id`` so a caller can read their OWN membership rows.
 
