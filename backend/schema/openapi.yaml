@@ -352,9 +352,7 @@ paths:
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/ScenarioSummary'
+                $ref: '#/components/schemas/ScenarioPage'
           description: ''
     post:
       operationId: scenarios_create_draft
@@ -425,9 +423,7 @@ paths:
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/VersionSummary'
+                $ref: '#/components/schemas/VersionPage'
           description: ''
   /api/v1/scenarios/{scenario_slug}/versions/{manifest_version}:
     get:
@@ -620,6 +616,23 @@ paths:
     get:
       operationId: streams_list
       description: 'GET/POST /streams (api-spec §4.8 #39-40).'
+      parameters:
+      - in: query
+        name: scenario_instance_id
+        schema:
+          type: string
+        description: Filter to streams of one scenario instance.
+      - in: query
+        name: status
+        schema:
+          type: string
+        description: Comma list of lifecycle_state values to filter by.
+      - in: query
+        name: workspace_id
+        schema:
+          type: string
+        description: The owning workspace UUID (W-2); absent → 404.
+        required: true
       tags:
       - streams
       security:
@@ -630,9 +643,7 @@ paths:
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/StreamResponse'
+                $ref: '#/components/schemas/StreamPage'
           description: ''
     post:
       operationId: streams_create
@@ -984,9 +995,7 @@ paths:
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/Workspace'
+                $ref: '#/components/schemas/WorkspacePage'
           description: ''
     post:
       operationId: workspaces_create
@@ -1101,9 +1110,7 @@ paths:
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/ApiKeyListItem'
+                $ref: '#/components/schemas/ApiKeyPage'
           description: ''
     post:
       operationId: api_keys_create
@@ -1179,9 +1186,7 @@ paths:
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/AuditEntry'
+                $ref: '#/components/schemas/AuditEntryPage'
           description: ''
   /api/v1/workspaces/{workspace_id}/members:
     get:
@@ -1202,9 +1207,7 @@ paths:
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/Membership'
+                $ref: '#/components/schemas/MembershipPage'
           description: ''
     post:
       operationId: members_add
@@ -1343,9 +1346,7 @@ paths:
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/ScenarioInstance'
+                $ref: '#/components/schemas/ScenarioInstancePage'
           description: ''
     post:
       operationId: scenario_instances_create
@@ -1608,6 +1609,19 @@ components:
       - prefix
       - scopes
       - state
+    ApiKeyPage:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/ApiKeyListItem'
+        next_cursor:
+          type: string
+          nullable: true
+      required:
+      - data
+      - next_cursor
     AuditEntry:
       type: object
       properties:
@@ -1642,6 +1656,19 @@ components:
       - occurred_at
       - target
       - workspace_id
+    AuditEntryPage:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditEntry'
+        next_cursor:
+          type: string
+          nullable: true
+      required:
+      - data
+      - next_cursor
     ChangePasswordRequest:
       type: object
       properties:
@@ -1969,6 +1996,19 @@ components:
       - joined_at
       - role
       - user_id
+    MembershipPage:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Membership'
+        next_cursor:
+          type: string
+          nullable: true
+      required:
+      - data
+      - next_cursor
     MembershipSummary:
       type: object
       properties:
@@ -2127,6 +2167,32 @@ components:
       - scenario_slug
       - updated_at
       - workspace_id
+    ScenarioInstancePage:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/ScenarioInstance'
+        next_cursor:
+          type: string
+          nullable: true
+      required:
+      - data
+      - next_cursor
+    ScenarioPage:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/ScenarioSummary'
+        next_cursor:
+          type: string
+          nullable: true
+      required:
+      - data
+      - next_cursor
     ScenarioSummary:
       type: object
       properties:
@@ -2242,6 +2308,19 @@ components:
       - name
       - scenario_instance_id
       - workspace_id
+    StreamPage:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/StreamResponse'
+        next_cursor:
+          type: string
+          nullable: true
+      required:
+      - data
+      - next_cursor
     StreamResponse:
       type: object
       description: |-
@@ -2513,6 +2592,19 @@ components:
       required:
       - is_verified
       - user_id
+    VersionPage:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/VersionSummary'
+        next_cursor:
+          type: string
+          nullable: true
+      required:
+      - data
+      - next_cursor
     VersionProvenance:
       type: object
       description: 'One version''s provenance row (#63 detail, #64 list).'
@@ -2617,6 +2709,19 @@ components:
           pattern: ^[a-z][a-z0-9-]{2,47}$
       required:
       - name
+    WorkspacePage:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Workspace'
+        next_cursor:
+          type: string
+          nullable: true
+      required:
+      - data
+      - next_cursor
     _DesiredState:
       type: object
       properties:

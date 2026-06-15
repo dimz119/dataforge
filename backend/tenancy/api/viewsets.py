@@ -25,6 +25,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from config.problems import NotFoundError, PermissionDeniedError
+from config.schema import page_envelope
 from identity.application.permissions import IsVerified
 from identity.domain.models import User
 from identity.infra.jwt import DataForgeJWTAuthentication
@@ -103,7 +104,8 @@ class WorkspaceCollectionView(APIView):
     permission_classes = [IsAuthenticated]
 
     @extend_schema(
-        operation_id="workspaces_list", responses={200: serializers.WorkspaceSerializer(many=True)}
+        operation_id="workspaces_list",
+        responses={200: page_envelope("WorkspacePage", serializers.WorkspaceSerializer)},
     )
     def get(self, request: Request) -> Response:
         rows = services.list_user_workspaces(_user(request))
@@ -189,7 +191,8 @@ class MembershipCollectionView(APIView):
     permission_classes = [IsAuthenticated]
 
     @extend_schema(
-        operation_id="members_list", responses={200: serializers.MembershipSerializer(many=True)}
+        operation_id="members_list",
+        responses={200: page_envelope("MembershipPage", serializers.MembershipSerializer)},
     )
     def get(self, request: Request, workspace_id: str) -> Response:
         workspace, _role = _resolve_workspace(request, workspace_id)
@@ -256,7 +259,7 @@ class ApiKeyCollectionView(APIView):
 
     @extend_schema(
         operation_id="api_keys_list",
-        responses={200: serializers.ApiKeyListItemSerializer(many=True)},
+        responses={200: page_envelope("ApiKeyPage", serializers.ApiKeyListItemSerializer)},
     )
     def get(self, request: Request, workspace_id: str) -> Response:
         workspace, _role = _resolve_workspace(request, workspace_id)
@@ -383,7 +386,10 @@ class AuditLogView(APIView):
     authentication_classes: list[type] = [DataForgeJWTAuthentication]
     permission_classes = [IsAuthenticated]
 
-    @extend_schema(responses={200: serializers.AuditEntrySerializer(many=True)})
+    @extend_schema(
+        operation_id="workspaces_audit_log_list",
+        responses={200: page_envelope("AuditEntryPage", serializers.AuditEntrySerializer)},
+    )
     def get(self, request: Request, workspace_id: str) -> Response:
         workspace, role = _resolve_workspace(request, workspace_id)
         _require_admin(role)

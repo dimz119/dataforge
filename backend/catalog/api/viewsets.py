@@ -39,6 +39,7 @@ from config.problems import (
     PermissionDeniedError,
     RateLimited,
 )
+from config.schema import page_envelope
 from identity.infra.jwt import DataForgeJWTAuthentication
 from tenancy.api.authentication import ApiKeyAuthentication, ApiKeyPrincipal
 from tenancy.api.middleware import arm_request_workspace
@@ -115,7 +116,7 @@ class ScenarioCollectionView(APIView):
 
     @extend_schema(
         operation_id="scenarios_list",
-        responses={200: serializers.ScenarioSummarySerializer(many=True)},
+        responses={200: page_envelope("ScenarioPage", serializers.ScenarioSummarySerializer)},
     )
     def get(self, request: Request) -> Response:
         requested = _query_workspace_id(request)
@@ -267,7 +268,7 @@ class ScenarioVersionsView(APIView):
 
     @extend_schema(
         operation_id="scenarios_versions_list",
-        responses={200: serializers.VersionSummarySerializer(many=True)},
+        responses={200: page_envelope("VersionPage", serializers.VersionSummarySerializer)},
     )
     def get(self, request: Request, scenario_slug: str) -> Response:
         workspace_id = _caller_workspace_id(request, _query_workspace_id(request))
@@ -465,7 +466,9 @@ class ScenarioInstanceCollectionView(APIView):
 
     @extend_schema(
         operation_id="scenario_instances_list",
-        responses={200: serializers.ScenarioInstanceSerializer(many=True)},
+        responses={
+            200: page_envelope("ScenarioInstancePage", serializers.ScenarioInstanceSerializer),
+        },
     )
     def get(self, request: Request, workspace_id: str) -> Response:
         workspace = _resolve_ws_for_read(request, workspace_id)
