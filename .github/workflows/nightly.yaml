@@ -90,3 +90,54 @@ jobs:
       - name: Tear down
         if: always()
         run: docker compose -f infra/compose/compose.yaml down -v
+
+  e2e-nightly:
+    name: E2E nightly (keys / stream-control / live-tail / a11y)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # The nightly Playwright lane (testing-strategy §12; phase-07 P7-14):
+    #   keys.spec.ts           — reveal-once never re-shows; revoke < 1 s (exit #4 + OPS-6)
+    #   stream-control.spec.ts — lifecycle badges + control matrix (exit #3)
+    #   live-tail.spec.ts      — 100+ TPS tail no-freeze, counters, filter (exit #2)
+    #   a11y.spec.ts           — @axe-core on one page per group (exit #7)
+    # All run against the FULL compose stack (web + api + ws + runner + mailpit).
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend deps
+        working-directory: frontend
+        run: npm ci
+      - name: Install Playwright browser
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+      - name: Prepare compose env
+        run: cp infra/compose/.env.example infra/compose/.env
+      - name: Bring up the full stack
+        run: docker compose -f infra/compose/compose.yaml up -d --wait
+      - name: Nightly E2E lane (@nightly)
+        working-directory: frontend
+        env:
+          CI: "true"
+          E2E_BASE_URL: http://localhost:5173
+          E2E_API_URL: http://localhost:8000
+          E2E_MAILPIT_URL: http://localhost:8025
+        run: npm run test:e2e:nightly
+      - name: Upload E2E artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-nightly-report
+          path: |
+            frontend/playwright-report/
+            frontend/test-results/
+          retention-days: 7
+      - name: Dump compose logs on failure
+        if: failure()
+        run: docker compose -f infra/compose/compose.yaml logs --no-color | tail -n 400
+      - name: Tear down
+        if: always()
+        run: docker compose -f infra/compose/compose.yaml down -v

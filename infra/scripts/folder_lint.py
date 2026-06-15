@@ -62,6 +62,7 @@ ALLOWED_OPTIONAL: frozenset[str] = frozenset(
         ".vscode",
         ".idea",
         ".DS_Store",
+        ".playwright-mcp",  # Playwright MCP browser-session artifacts (gitignored, verify-time only)
     }
 )
 
