@@ -294,10 +294,85 @@ jobs:
         run: npm ci
       - name: Lint (eslint)
         run: npm run lint
-      - name: Type-check (tsc)
+      - name: Type-check (tsc, app source)
         run: npx tsc --noEmit
-      - name: Tests (vitest)
-        run: npm test -- --run
+      # The Playwright E2E specs live outside tsconfig.json's `include`; typecheck
+      # them as their own program (tsconfig.e2e.json) so a spec compile error fails
+      # the PR before the compose E2E lane ever runs.
+      - name: Type-check (tsc, E2E specs)
+        run: npx tsc --noEmit -p tsconfig.e2e.json
+      # Generated-client lockstep (Phase-7 exit #5; ADR-0014/0016): regenerate the
+      # typed client from backend/schema/openapi.yaml and fail on any drift. This is
+      # the FE side of the contract gate — a FE/BE schema divergence fails the build.
+      # PERMANENT, never skippable.
+      - name: Generated-client drift gate (gen:api:check)
+        run: npm run gen:api:check
+      # Coverage gate (Phase-7 exit #6; frontend-architecture §11.1): shared/api +
+      # shared/ws ≥ 90% line; features ≥ 70%. The per-glob thresholds are enforced
+      # in vite.config.ts; a drop fails CI here.
+      - name: Tests + coverage gate (vitest)
+        run: npm run test:coverage
+      # Bundle-budget gate (Phase-7 exit #6 / P7-15; frontend-architecture §12.1):
+      # build, then the gzip size check — entry boot graph ≤ 250 KB, every lazy
+      # route chunk ≤ 150 KB. (The runtime tail budget — no main-thread task > 50 ms
+      # at 1,000 TPS — is a Playwright tracing assertion in the nightly live-tail
+      # spec, not a static check.)
+      - name: Build + bundle-budget gate (size:check)
+        run: |
+          npm run build
+          npm run size:check
+
+  # PR-lane E2E smoke (Phase-7 exit #1; testing-strategy §12): auth + core-loop
+  # against the FULL compose stack (api, ws, worker, runner, buffer-writer, web +
+  # the dev-only mailpit for the verification token). core-loop.spec.ts is THE
+  # Phase-7 exit gate. This job needs the whole stack, so it is COMPOSE-based (not
+  # the service-container frontend job above). It runs only when frontend changes.
+  e2e-smoke:
+    name: e2e-smoke (compose)
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend deps
+        working-directory: frontend
+        run: npm ci
+      - name: Install Playwright browser
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+      - name: Prepare compose env
+        run: cp infra/compose/.env.example infra/compose/.env
+      - name: Bring up the full stack (api, ws, worker, runner, buffer-writer, web, mailpit)
+        run: docker compose -f infra/compose/compose.yaml up -d --wait
+      - name: PR smoke E2E (auth + core-loop, @smoke)
+        working-directory: frontend
+        env:
+          CI: "true"
+          E2E_BASE_URL: http://localhost:5173
+          E2E_API_URL: http://localhost:8000
+          E2E_MAILPIT_URL: http://localhost:8025
+        run: npm run test:e2e:smoke
+      - name: Upload E2E artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-smoke-report
+          path: |
+            frontend/playwright-report/
+            frontend/test-results/
+          retention-days: 7
+      - name: Dump compose logs on failure
+        if: failure()
+        run: docker compose -f infra/compose/compose.yaml logs --no-color | tail -n 400
+      - name: Tear down
+        if: always()
+        run: docker compose -f infra/compose/compose.yaml down -v
 
   openapi-artifact:
     name: openapi-artifact

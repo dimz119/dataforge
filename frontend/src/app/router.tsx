@@ -8,23 +8,13 @@ import { scenariosRoutes } from '../features/scenarios';
 import { streamsRoutes } from '../features/streams';
 import { workspacesAdminRoutes, workspacesAuthRoutes } from '../features/workspaces';
 import { NotFoundPage } from '../shared/ui/NotFoundPage';
-import { PlaceholderPage } from '../shared/ui/PlaceholderPage';
 import { PublicOnly } from './guards/PublicOnly';
 import { RequireAdmin } from './guards/RequireAdmin';
 import { RequireAuth } from './guards/RequireAuth';
 import { RequireWorkspace } from './guards/RequireWorkspace';
 import { AuthLayout } from './layouts/AuthLayout';
 import { WorkspaceLayout } from './layouts/WorkspaceLayout';
-
-/**
- * Phase 1 stub: placeholder page — Phase 7 replaces this with the real
- * WorkspaceResolver, which redirects "/" to /w/{last-or-first slug}/dashboard,
- * or to /workspaces/new when the user has no workspace
- * (frontend-architecture §3.1).
- */
-function WorkspaceResolverPage() {
-  return <PlaceholderPage group="Console shell" page="Workspace resolver" phase={7} />;
-}
+import { WorkspaceResolver } from './WorkspaceResolver';
 
 /**
  * The full Phase 1 routing skeleton: every Phase-7 path of the routing map
@@ -36,7 +26,7 @@ export const routes: RouteObject[] = [
   {
     element: <RequireAuth />,
     children: [
-      { path: '/', element: <WorkspaceResolverPage /> },
+      { path: '/', element: <WorkspaceResolver /> },
       ...workspacesAuthRoutes,
       {
         path: '/w/:slug',

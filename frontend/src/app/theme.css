@@ -1,58 +1,83 @@
 /*
- * Design tokens for the console shell.
- *
- * Phase 7 replaces this file with the Tailwind v4 CSS-first @theme token set
- * (frontend-architecture §8): color scale, spacing, radii, and font stack as
- * @theme variables. Phase 1 ships plain CSS custom properties so the routing
- * skeleton renders legibly without pulling Tailwind into the scaffold.
+ * DataForge console design tokens (frontend-architecture §8).
+ * Tailwind v4 CSS-first config: tokens declared in `@theme` — no tailwind.config.js.
+ * Single light theme in the MVP; every color flows through a token so theming is
+ * additive later. Token pairs meet WCAG AA contrast.
  */
+@import 'tailwindcss';
 
-:root {
-  --df-color-bg: #f9fafb;
-  --df-color-surface: #ffffff;
-  --df-color-border: #e5e7eb;
-  --df-color-text: #1f2937;
-  --df-color-text-muted: #6b7280;
-  --df-color-accent: #2563eb;
-  --df-font-sans: system-ui, -apple-system, 'Segoe UI', sans-serif;
+@theme {
+  /* Surfaces & text */
+  --color-bg: #f9fafb;
+  --color-surface: #ffffff;
+  --color-surface-muted: #f3f4f6;
+  --color-border: #e5e7eb;
+  --color-text: #1f2937;
+  --color-text-muted: #6b7280;
+
+  /* Brand / accent */
+  --color-accent: #2563eb;
+  --color-accent-fg: #ffffff;
+  --color-accent-hover: #1d4ed8;
+
+  /* Status palette (StatusBadge, §8) */
+  --color-status-gray: #6b7280;
+  --color-status-blue: #2563eb;
+  --color-status-green: #16a34a;
+  --color-status-amber: #d97706;
+  --color-status-red: #dc2626;
+
+  /* Feedback */
+  --color-danger: #dc2626;
+  --color-danger-fg: #ffffff;
+  --color-success: #16a34a;
+  --color-warning: #d97706;
+
+  /* Radii */
+  --radius-sm: 0.25rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.75rem;
+
+  /* Type */
+  --font-sans: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', 'Cascadia Code', Menlo, monospace;
 }
 
-body {
-  margin: 0;
-  background: var(--df-color-bg);
-  color: var(--df-color-text);
-  font-family: var(--df-font-sans);
+@layer base {
+  body {
+    margin: 0;
+    background: var(--color-bg);
+    color: var(--color-text);
+    font-family: var(--font-sans);
+  }
+
+  *:focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
 }
 
-.df-workspace-layout__topbar {
-  display: flex;
-  align-items: baseline;
-  gap: 0.75rem;
-  padding: 0.75rem 1.25rem;
-  background: var(--df-color-surface);
-  border-bottom: 1px solid var(--df-color-border);
+/* prefers-reduced-motion disables the transitional status-badge pulse (§8). */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }
 
-.df-workspace-layout__brand {
-  font-weight: 700;
-  letter-spacing: -0.02em;
+@keyframes df-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
 }
 
-.df-workspace-layout__hint,
-.df-placeholder-page__group {
-  color: var(--df-color-text-muted);
-  font-size: 0.875rem;
-}
-
-.df-workspace-layout__content,
-.df-auth-layout,
-.df-placeholder-page,
-.df-not-found-page {
-  padding: 1.5rem 1.25rem;
-}
-
-.df-placeholder-page__group {
-  margin: 0;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+.df-pulse {
+  animation: df-pulse 1.6s ease-in-out infinite;
 }

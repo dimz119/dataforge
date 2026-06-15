@@ -21,7 +21,7 @@ import uuid
 from decimal import Decimal
 from typing import Any
 
-from drf_spectacular.utils import extend_schema
+from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.request import Request
@@ -35,6 +35,7 @@ from config.problems import (
     PermissionDeniedError,
     QuotaExceeded,
 )
+from config.schema import page_envelope
 from identity.infra.jwt import DataForgeJWTAuthentication
 from streams.api import serializers
 from streams.application import quotas, services
@@ -188,7 +189,28 @@ class StreamCollectionView(APIView):
 
     @extend_schema(
         operation_id="streams_list",
-        responses={200: serializers.StreamResponseSerializer(many=True)},
+        parameters=[
+            OpenApiParameter(
+                "workspace_id",
+                str,
+                location=OpenApiParameter.QUERY,
+                required=True,
+                description="The owning workspace UUID (W-2); absent → 404.",
+            ),
+            OpenApiParameter(
+                "status",
+                str,
+                location=OpenApiParameter.QUERY,
+                description="Comma list of lifecycle_state values to filter by.",
+            ),
+            OpenApiParameter(
+                "scenario_instance_id",
+                str,
+                location=OpenApiParameter.QUERY,
+                description="Filter to streams of one scenario instance.",
+            ),
+        ],
+        responses={200: page_envelope("StreamPage", serializers.StreamResponseSerializer)},
     )
     def get(self, request: Request) -> Response:
         workspace_id = _query_workspace_id(request)

@@ -54,3 +54,6 @@ backend/celerybeat-schedule.*
 # Local dataset blob storage (DATASET_STORAGE_DIR default, generation/infra/storage.py)
 # — gzipped JSONL artifacts written at batch-generation time; runtime data, not source.
 backend/var/
+
+# Playwright MCP browser-session artifacts (verify-time only)
+.playwright-mcp/

@@ -1,13 +1,25 @@
+import { Suspense } from 'react';
 import { Outlet } from 'react-router';
 
+import { PageSkeleton } from '../../shared/ui';
+
 /**
- * Layout for the unauthenticated auth pages. Phase 7 replaces this with the
- * styled centered-card layout of the Console MVP.
+ * Centered-card layout for the unauthenticated auth pages (frontend-architecture
+ * §8). Hosts login/signup/verify/reset inside a single surface card.
  */
 export function AuthLayout() {
   return (
-    <main className="df-auth-layout">
-      <Outlet />
+    <main className="flex min-h-screen items-center justify-center bg-bg p-6">
+      <div className="w-full max-w-sm">
+        <div className="mb-6 text-center">
+          <span className="text-xl font-bold tracking-tight text-text">DataForge</span>
+        </div>
+        <div className="rounded-lg border border-border bg-surface p-6 shadow-sm">
+          <Suspense fallback={<PageSkeleton />}>
+            <Outlet />
+          </Suspense>
+        </div>
+      </div>
     </main>
   );
 }

@@ -1,11 +1,18 @@
-import { Outlet } from 'react-router';
+import { Outlet, useParams } from 'react-router';
+
+import { findMembership, useSession } from '../../features/auth';
+import { NotFoundPage, PageSkeleton } from '../../shared/ui';
 
 /**
- * Phase 1 stub: always renders the outlet — Phase 7 replaces this.
- * The real guard resolves :slug against the ['workspaces'] memberships and
- * renders NotFoundPage on miss, so cross-tenant probes are indistinguishable
- * from missing resources (frontend-architecture §3.2).
+ * RequireWorkspace (frontend-architecture §3.2). Resolves `:slug` against the
+ * session's memberships. A miss renders NotFoundPage — cross-tenant probes are
+ * INDISTINGUISHABLE from missing resources, mirroring the API's 403/404 policy.
  */
 export function RequireWorkspace() {
+  const { isLoading, user } = useSession();
+  const { slug } = useParams();
+
+  if (isLoading) return <PageSkeleton />;
+  if (!findMembership(user, slug)) return <NotFoundPage />;
   return <Outlet />;
 }
