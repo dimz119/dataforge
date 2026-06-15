@@ -1,0 +1,20 @@
+/** Design-system public surface (frontend-architecture §8). Features import from here. */
+export { Button, type ButtonProps } from './Button';
+export { Input, type InputProps } from './Input';
+export { FormField, type FormFieldProps } from './FormField';
+export { PageHeader, type PageHeaderProps } from './PageHeader';
+export { StatusBadge, type StatusBadgeProps } from './StatusBadge';
+export { Sparkline, type SparklineProps } from './Sparkline';
+export { Skeleton, PageSkeleton, type SkeletonProps } from './Skeleton';
+export { EmptyState, type EmptyStateProps } from './EmptyState';
+export { ErrorState, type ErrorStateProps } from './ErrorState';
+export { ErrorBoundary } from './ErrorBoundary';
+export { CopyField, type CopyFieldProps } from './CopyField';
+export { CodeSnippet, type CodeSnippetProps } from './CodeSnippet';
+export { JsonViewer, type JsonViewerProps } from './JsonViewer';
+export { DataTable, type DataTableProps, type Column } from './DataTable';
+export { Dialog, type DialogProps } from './Dialog';
+export { ConfirmDialog, type ConfirmDialogProps } from './ConfirmDialog';
+export { ToastProvider, useToast, type ToastInput, type ToastTone } from './toast';
+export { NotFoundPage } from './NotFoundPage';
+export { PlaceholderPage, type PlaceholderPageProps } from './PlaceholderPage';
