@@ -45,12 +45,21 @@ _AUTO_TIMESTAMPS = ("created_at", "updated_at")
 
 @dataclass(frozen=True)
 class DerivedSubject:
-    """One derived subject + its closed v1 schema document (annotations included)."""
+    """One derived subject + its closed v1 schema document (annotations included).
+
+    ``document`` is the **version-1** closed-profile document (every property
+    ``required`` — R-DER-3); it is what the subject-absent and byte-identical
+    re-derivation paths register/compare. ``bindings`` carries, per property, the
+    manifest valueSource declaration to stamp as ``x-df-binding`` (§5.3) when the
+    property is *first introduced at version ≥ 2* — used by
+    :func:`document_for_version` to assemble the N≥2 candidate at registration.
+    """
 
     subject: str
     event_type: str  # business event type, or "cdc.{entity}" for CDC subjects
     is_cdc: bool
     document: dict[str, Any]  # full closed-profile JSON Schema (R-DER-3)
+    bindings: dict[str, Any]  # property name → its manifest valueSource (§5.3)
 
 
 def derive_subjects(manifest: dict[str, Any]) -> list[DerivedSubject]:
@@ -77,6 +86,7 @@ def derive_subjects(manifest: dict[str, Any]) -> list[DerivedSubject]:
                 event_type=event_type,
                 is_cdc=False,
                 document=_closed_document(subject, 1, properties, f"event type {event_type}"),
+                bindings=_event_payload_bindings(spec),
             )
         )
 
@@ -91,9 +101,72 @@ def derive_subjects(manifest: dict[str, Any]) -> list[DerivedSubject]:
                 document=_closed_document(
                     subject, 1, properties, f"CDC row image for entity {entity_name}"
                 ),
+                bindings=_cdc_row_image_bindings(view, entity_name),
             )
         )
     return out
+
+
+def document_for_version(
+    derived: DerivedSubject,
+    *,
+    latest_required: list[str],
+    latest_properties: dict[str, Any],
+    next_version: int,
+) -> dict[str, Any]:
+    """Assemble the version-``N`` (``N ≥ 2``) candidate document under REQ-RULE.
+
+    The subject already has a registered latest version (``required = latest_required``,
+    properties ``latest_properties``). Per schema-registry §4.1/§5.1:
+
+    * ``required(N) = required(N-1)`` **exactly** -- carried forward verbatim, never
+      recomputed from the property set (so a newly-added field is *optional* and the
+      §6 ``required``-set check, REG-C003, passes). Sorted for byte-identical
+      determinism (R-DER-5); the latest array is already sorted, ``sorted`` is a
+      no-op that also tolerates a hand-authored Flow-2 fixture.
+    * Properties present at version ``N-1`` keep their fragment; properties added at
+      version ``N`` (``properties(N) \\ properties(N-1)``) enter ``properties`` only,
+      each annotated with ``x-df-binding`` copied verbatim from its manifest
+      valueSource declaration (§5.3). The annotation is stripped from comparison
+      form (§6.1), so it never affects the gate or the fingerprint.
+    """
+    properties = derived.document["properties"]
+    annotated: dict[str, Any] = {}
+    for name, fragment in properties.items():
+        if name in latest_properties:
+            annotated[name] = fragment
+            continue
+        binding = derived.bindings.get(name)
+        annotated[name] = {**fragment, "x-df-binding": binding} if binding is not None else fragment
+    doc = dict(derived.document)
+    doc["$id"] = f"{_ID_BASE}/{derived.subject}/versions/{next_version}.json"
+    doc["title"] = f"{derived.subject} v{next_version}"
+    doc["required"] = sorted(latest_required)
+    doc["properties"] = annotated
+    return doc
+
+
+def _event_payload_bindings(spec: dict[str, Any]) -> dict[str, Any]:
+    """Per payload field → its manifest valueSource (the §5.3 ``x-df-binding``)."""
+    payload: dict[str, Any] = spec.get("payload", {}) or {}
+    return {name: dict(source) for name, source in payload.items() if isinstance(source, dict)}
+
+
+def _cdc_row_image_bindings(view: ManifestView, entity_name: str) -> dict[str, Any]:
+    """Per CDC row-image attribute → its manifest declaration (the §5.3 binding).
+
+    A CDC field's binding is its declared entity-attribute generator wrapped as a
+    ``{"generated": …}`` valueSource (§5.2 vocabulary); the implicit key and auto
+    timestamps carry no binding (they exist in version 1 and are never added later).
+    """
+    entity = view.entities.get(entity_name)
+    if entity is None:
+        return {}
+    return {
+        attr_name: {"generated": dict(generator_spec)}
+        for attr_name, generator_spec in entity.attributes.items()
+        if isinstance(generator_spec, dict)
+    }
 
 
 def _closed_document(

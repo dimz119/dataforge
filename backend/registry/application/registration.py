@@ -35,7 +35,7 @@ from uuid import UUID
 from registry.domain.models import COMPAT_BACKWARD_ADDITIVE, SchemaVersion, Subject
 from registry.infra.canonical import fingerprint
 from registry.infra.compat import CompatError, check_backward_additive
-from registry.infra.derive import derive_subjects
+from registry.infra.derive import DerivedSubject, derive_subjects, document_for_version
 
 
 class OnRegistered(Protocol):
@@ -83,8 +83,7 @@ def register_derived_schemas(
     results: list[RegisteredVersion] = []
     for derived in derive_subjects(manifest):
         result = _register_one(
-            subject_name=derived.subject,
-            document=derived.document,
+            derived=derived,
             scenario_id=scenario_id,
             workspace_id=workspace_id,
             definition_id=definition_id,
@@ -96,17 +95,18 @@ def register_derived_schemas(
 
 def _register_one(
     *,
-    subject_name: str,
-    document: dict[str, Any],
+    derived: DerivedSubject,
     scenario_id: UUID,
     workspace_id: UUID | None,
     definition_id: UUID,
     on_registered: OnRegistered | None,
 ) -> RegisteredVersion:
-    candidate_fp = fingerprint(document)
+    subject_name = derived.subject
     subject_row = _lock_subject(subject_name, workspace_id)
 
     if subject_row is None:
+        # Subject absent → create + register version 1 with every property required
+        # (R-DER-3). ``derived.document`` is the all-required v1 closed document.
         subject_row = Subject.objects.create(
             subject=subject_name,
             scenario_id=scenario_id,
@@ -115,8 +115,8 @@ def _register_one(
         )
         return _create_version(
             subject_row=subject_row,
-            document=document,
-            fingerprint_hex=candidate_fp,
+            document=derived.document,
+            fingerprint_hex=fingerprint(derived.document),
             version=1,
             compat_checked_against=None,
             workspace_id=workspace_id,
@@ -127,21 +127,45 @@ def _register_one(
     latest = (
         SchemaVersion.objects.filter(subject=subject_row).order_by("-version").first()
     )
-    if latest is not None and latest.fingerprint == candidate_fp:
+    if latest is None:  # pragma: no cover - a subject row always has version 1
+        return _create_version(
+            subject_row=subject_row,
+            document=derived.document,
+            fingerprint_hex=fingerprint(derived.document),
+            version=1,
+            compat_checked_against=None,
+            workspace_id=workspace_id,
+            definition_id=definition_id,
+            on_registered=on_registered,
+        )
+
+    # Subject exists → the candidate that *would* be registered is the version-N
+    # document under REQ-RULE: required carried forward from the latest exactly,
+    # newly-added properties optional + ``x-df-binding``-annotated (§4.1/§5.1/§5.3).
+    candidate = document_for_version(
+        derived,
+        latest_required=list(latest.json_schema.get("required", []) or []),
+        latest_properties=dict(latest.json_schema.get("properties", {}) or {}),
+        next_version=latest.version + 1,
+    )
+    candidate_fp = fingerprint(candidate)
+
+    # candidate fingerprint = latest fingerprint → register nothing (R-DER-4). The
+    # fingerprint is over the comparison form, so an unchanged subject (carrying the
+    # same required set + properties) re-derives byte-identically and no-ops.
+    if latest.fingerprint == candidate_fp:
         return RegisteredVersion(subject=subject_name, version=latest.version, created=False)
 
-    if latest is not None:
-        errors = check_backward_additive(latest.json_schema, document)
-        if errors:
-            raise SchemaCompatibilityError(subject_name, errors)
+    errors = check_backward_additive(latest.json_schema, candidate)
+    if errors:
+        raise SchemaCompatibilityError(subject_name, errors)
 
-    next_version = (latest.version + 1) if latest is not None else 1
     return _create_version(
         subject_row=subject_row,
-        document=document,
+        document=candidate,
         fingerprint_hex=candidate_fp,
-        version=next_version,
-        compat_checked_against=latest.version if latest is not None else None,
+        version=latest.version + 1,
+        compat_checked_against=latest.version,
         workspace_id=workspace_id,
         definition_id=definition_id,
         on_registered=on_registered,
