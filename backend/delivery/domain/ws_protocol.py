@@ -85,15 +85,29 @@ CLOSE_QUOTA_EXCEEDED: Final = 4429  # connection quota exceeded (WS-4)
 
 # -- S→C frame builders (§6.3 catalog) ----------------------------------------
 def build_ready_frame(
-    *, stream_id: str, cursor: str, types: Sequence[str], sample_rate: float
+    *,
+    stream_id: str,
+    cursor: str,
+    types: Sequence[str],
+    sample_rate: float,
+    entity_type: str | None = None,
+    entity_key: str | None = None,
 ) -> dict[str, Any]:
-    """The ``ready`` frame (§6.3): auth accepted; tailing begins after this frame."""
+    """The ``ready`` frame (§6.3): auth accepted; tailing begins after this frame.
+
+    ``filters`` echoes the accepted filter set, including the Phase-8 per-entity CDC
+    filter (R-CDC-7) when active, so the client renders what the server is applying.
+    """
+    filters: dict[str, Any] = {"types": list(types), "sample_rate": sample_rate}
+    if entity_type and entity_key:
+        filters["entity_type"] = entity_type
+        filters["entity_key"] = entity_key
     return {
         "type": "ready",
         "protocol": SUBPROTOCOL_V1,
         "stream_id": stream_id,
         "position": {"cursor": cursor},
-        "filters": {"types": list(types), "sample_rate": sample_rate},
+        "filters": filters,
     }
 
 
@@ -166,8 +180,14 @@ def _client_frames() -> dict[str, Any]:
                     "maxItems": MAX_TYPES_FILTER,
                 },
                 "sample_rate": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+                "entity_type": {"type": "string", "maxLength": 64},
+                "entity_key": {"type": "string", "maxLength": 256},
             },
             "oneOf": [{"required": ["api_key"]}, {"required": ["access_token"]}],
+            "dependentRequired": {
+                "entity_type": ["entity_key"],
+                "entity_key": ["entity_type"],
+            },
             "additionalProperties": False,
         },
         "resume": {
@@ -210,6 +230,8 @@ def _server_frames() -> dict[str, Any]:
                     "properties": {
                         "types": {"type": "array", "items": {"type": "string"}},
                         "sample_rate": {"type": "number"},
+                        "entity_type": {"type": "string", "maxLength": 64},
+                        "entity_key": {"type": "string", "maxLength": 256},
                     },
                     "additionalProperties": False,
                 },

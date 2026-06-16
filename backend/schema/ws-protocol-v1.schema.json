@@ -73,6 +73,14 @@
           "type": "number",
           "exclusiveMinimum": 0,
           "maximum": 1
+        },
+        "entity_type": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "entity_key": {
+          "type": "string",
+          "maxLength": 256
         }
       },
       "oneOf": [
@@ -87,6 +95,14 @@
           ]
         }
       ],
+      "dependentRequired": {
+        "entity_type": [
+          "entity_key"
+        ],
+        "entity_key": [
+          "entity_type"
+        ]
+      },
       "additionalProperties": false
     },
     "drop_notice": {
@@ -236,6 +252,14 @@
             },
             "sample_rate": {
               "type": "number"
+            },
+            "entity_type": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "entity_key": {
+              "type": "string",
+              "maxLength": 256
             }
           },
           "additionalProperties": false
