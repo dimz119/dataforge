@@ -118,22 +118,42 @@ class BindingContext:
         raise GenerationError(f"cannot root an entity ref at {kind!r}")
 
     def _hop(self, record: PooledEntity, relationship: str) -> PooledEntity:
-        # Follow source→target: the record holds the FK attribute pointing at the
-        # relationship's target.
-        target_type = self._pools.relationship_target(relationship)
-        src_attr = self._fk_attribute(relationship)
-        target_key = record.attributes.get(src_attr)
-        if not isinstance(target_key, str):
-            raise GenerationError(f".via.{relationship}: no fk on {record.entity_key}")
-        return self._pools.require(target_type, target_key)
-
-    def _fk_attribute(self, relationship: str) -> str:
-        # relationship meta: (source_entity, source_attribute, target_entity)
-        for name in (relationship,):
-            meta = self._pools._rel_meta.get(name)
-            if meta is not None:
-                return meta[1]
-        raise GenerationError(f"unknown relationship {relationship!r}")
+        # A `.via.<relationship>` hop resolves through the relationship index in
+        # either direction (behavior-engine §4.2: the index serves `via` traversals,
+        # `target_entity_key → set(source_entity_key)`):
+        #
+        # * forward (record is the relationship's *source*): the record holds the FK
+        #   attribute pointing at the target — read it.
+        # * reverse (record is the relationship's *target*): look the record up in the
+        #   index as a target key to find its source(s). The manifest only takes a
+        #   reverse `via` hop over a relationship whose source is unique per target
+        #   (e-commerce `inventory_product` is one_to_one), so exactly one source key
+        #   is expected; the reservation rule's
+        #   `subject.via.order_primary_product.via.inventory_product` reaches the
+        #   order's inventory row this way (ecommerce.md §2 F-3, PRD §4.4).
+        meta = self._pools._rel_meta.get(relationship)
+        if meta is None:
+            raise GenerationError(f"unknown relationship {relationship!r}")
+        source_entity, source_attribute, target_entity = meta
+        if record.entity_type == source_entity:
+            target_key = record.attributes.get(source_attribute)
+            if not isinstance(target_key, str):
+                raise GenerationError(
+                    f".via.{relationship}: no fk on {record.entity_key}"
+                )
+            return self._pools.require(target_entity, target_key)
+        if record.entity_type == target_entity:
+            sources = self._pools.sources_for(relationship, record.entity_key)
+            if len(sources) != 1:
+                raise GenerationError(
+                    f".via.{relationship}: reverse hop from {record.entity_key} "
+                    f"resolved {len(sources)} sources (expected exactly 1)"
+                )
+            return self._pools.require(source_entity, next(iter(sources)))
+        raise GenerationError(
+            f".via.{relationship}: {record.entity_type} is neither the source "
+            f"({source_entity}) nor the target ({target_entity})"
+        )
 
     # -- context-path resolution (payload from, guard path, expr) ----------
 

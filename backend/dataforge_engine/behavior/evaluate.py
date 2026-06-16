@@ -184,11 +184,20 @@ def resolve_set(
     ctx: BindingContext,
     cursor: Cursor,
     pools: EntityPools,
+    *,
+    strip_markers: bool = True,
 ) -> dict[str, JSONValue]:
     """Resolve an effect/payload ``set`` mapping in declaration order (R-CDC-2).
 
     Sibling values accumulate so ``ref.attr`` ``via`` and ``person.email`` ``from``
     see prior fields; ``ref.fk`` results register in ``ref_keys`` for ``ref.attr``.
+
+    ``strip_markers`` (Phase-8+, the default) drops the internal ``__now__`` /
+    ``__virtual_epoch_ms__`` siblings the time-aware generators read, so they never
+    enter a CDC image or stored attribute. Pre-Phase-8 manifests pass ``False`` to
+    preserve the marker leak their golden baseline was frozen under (the caller —
+    the interpreter — gates this on ``ManifestIR.phase8_features``; the background
+    driver is Phase-8-only and always strips). See ``ir._phase8_features_enabled``.
     """
     resolved: dict[str, JSONValue] = {}
     ref_keys: dict[str, tuple[str, str]] = {}
@@ -201,6 +210,13 @@ def resolve_set(
         resolved[name] = value
         if source.kind == "generated" and isinstance(value, str):
             _register_ref(source, name, value, pools, ref_keys)
+    # ``resolve_value_source`` seeds the generator context's siblings (which IS
+    # ``resolved``) with ``__now__``/``__virtual_epoch_ms__`` for time-aware
+    # generators; those internal markers must never enter a CDC image or payload
+    # (they are stripped the same way in attribute/payload resolution).
+    if strip_markers:
+        resolved.pop("__now__", None)
+        resolved.pop("__virtual_epoch_ms__", None)
     return resolved
 
 

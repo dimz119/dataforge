@@ -52,7 +52,11 @@ def synthetic_manifest() -> dict[str, Any]:
     return {
         "manifest_schema": "v0",
         "metadata": {
-            "slug": "synth", "version": "1.0.0", "title": "Synthetic",
+            # 1.1.0 = the Phase-8 feature line (intensity curves, background
+            # mutations, CDC-image marker hygiene). The synthetic fixture exercises
+            # those behaviors (background_mutations below), so it declares the
+            # version that turns them on (ManifestIR.phase8_features; behavior-engine §3.4).
+            "slug": "synth", "version": "1.1.0", "title": "Synthetic",
             "actor_entity": "users", "simulated_timezone": "UTC",
         },
         "entities": {
@@ -169,8 +173,27 @@ def synthetic_manifest() -> dict[str, Any]:
             },
         },
         "cdc": {"entities": {
-            "users": {"enabled_default": True, "ops": ["c", "u", "r"]},
-            "products": {"enabled_default": True, "ops": ["c", "u", "r"]},
+            "users": {
+                "enabled_default": True, "ops": ["c", "u", "r"],
+                # R-CDC-3 background drift (the E4 SCD2 feed): a country change with
+                # no business event — a CDC-only chain root. High probability so the
+                # tests reliably observe firings over a short window.
+                "background_mutations": [
+                    {"name": "country_change",
+                     "rate": {"per": "entity_day", "probability": 0.5},
+                     "set": {"country": {"generator": "address.country"}}},
+                ],
+            },
+            "products": {
+                "enabled_default": True, "ops": ["c", "u", "r"],
+                "background_mutations": [
+                    {"name": "price_change",
+                     "rate": {"per": "entity_day", "probability": 0.3},
+                     "set": {"price": {"generator": "number.decimal",
+                                       "params": {"min": "1.00", "max": "100.00",
+                                                  "scale": 2}}}},
+                ],
+            },
             "orders": {"enabled_default": True, "ops": ["c", "u"]},
         }},
         "seeding": {"catalogs": {

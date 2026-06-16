@@ -26,6 +26,7 @@ from dataforge_engine.manifest import GENERATOR_CATALOG, ManifestView
 from .distributions import DwellSpec, compile_dwell, parse_duration_us
 from .errors import CompileError
 from .generators import GeneratorFn, build_generator
+from .intensity import IntensityCurve, compile_intensity
 
 if TYPE_CHECKING:
     from dataforge_engine.envelope.types import JSONValue
@@ -260,6 +261,25 @@ class EventTypeIR:
 
 
 @dataclass(frozen=True)
+class BackgroundMutationIR:
+    """A compiled ``cdc.entities.*.background_mutations`` rule (R-CDC-M2; R-CDC-3).
+
+    A background mutation has no causing business event: each eligible pooled
+    entity mutates with ``probability_per_day`` per simulated day (``per:
+    entity_day``, the only v0 rate basis), the draw keyed deterministically off the
+    ``pools`` sub-seed. The resulting CDC event is a chain root — ``causation_id``
+    null, ``correlation_id = event_id``, ``actor_id`` null (event-model R-CDC-3).
+    ``set_sources`` are the ``{attr: generatorSpec}`` block compiled to ``generated``
+    value sources (the generators are context-free, so resolution needs no
+    traversal). Always an ``op:"u"`` (attribute drift on an existing row).
+    """
+
+    name: str
+    probability_per_day: float
+    set_sources: tuple[tuple[str, ValueSource], ...]
+
+
+@dataclass(frozen=True)
 class EntityIR:
     """A compiled entity type: key prefix/attribute + ordered attribute generators."""
 
@@ -269,6 +289,7 @@ class EntityIR:
     attributes: tuple[tuple[str, GeneratorFn], ...]
     cdc_enabled: bool
     cdc_ops: frozenset[str]
+    background_mutations: tuple[BackgroundMutationIR, ...] = ()
 
 
 @dataclass
@@ -287,8 +308,25 @@ class ManifestIR:
     lifecycle_by_entity: dict[str, str]  # bound entity type → lifecycle machine name
     relationships: tuple[tuple[str, str, str, str], ...]
     # each rel: (name, source_entity, source_attribute, target_entity)
+    # source_entity → {source_attribute: (relationship, target_entity)} for every
+    # one_to_one relationship — the seeding bijection set (behavior-engine §4.5,
+    # ecommerce.md §2: equal-sized seed catalogs over a one_to_one relationship seed
+    # to a bijection, not a with-replacement draw, so every reverse `via` hop and the
+    # inventory reservation rule resolve to exactly one row).
+    one_to_one_seed_fks: dict[str, dict[str, tuple[str, str]]] = field(default_factory=dict)
     seeding: dict[str, int] = field(default_factory=dict)
     schema_versions: dict[str, int] = field(default_factory=dict)
+    # The renormalized diurnal x weekly arrival-rate curve (§3.4). Flat 1.0 when the
+    # manifest declares no `intensity` section — so it never changes average TPS.
+    intensity: IntensityCurve = field(default_factory=lambda: compile_intensity(None))
+    # Phase-8 behaviors (intensity curves, background mutations, and CDC-image marker
+    # hygiene) land at manifest version 1.1.0; pre-1.1.0 manifests keep the Phase-3/4
+    # semantics they were published (and golden-baselined) under (behavior-engine §3.4
+    # "Phase 8 (flat 1.0 before)", §8 BE-F4). A published version is immutable (P-6),
+    # so gating on the declared version keeps every existing 1.0.0 stream byte-stable
+    # (INV-GEN-3) while the 1.1.0 full manifest gets the new behaviors — the single
+    # switch GOLD-A (flat) and GOLD-B (curved + CDC) hang off.
+    phase8_features: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -364,8 +402,32 @@ def _compile_entities(view: ManifestView) -> dict[str, EntityIR]:
             attributes=tuple(attrs),
             cdc_enabled=bool(cdc_cfg.get("enabled_default", False)),
             cdc_ops=frozenset(cdc_cfg.get("ops", [])),
+            background_mutations=_compile_background_mutations(cdc_cfg),
         )
     return entities
+
+
+def _compile_background_mutations(
+    cdc_cfg: dict[str, Any],
+) -> tuple[BackgroundMutationIR, ...]:
+    """Compile the entity's ``background_mutations`` (R-CDC-M2). ``set`` is a
+    ``{attr: generatorSpec}`` map (context-free), compiled to ``generated`` value
+    sources so the driver reuses the same ``resolve_set`` path as effects.
+    """
+    rules: list[BackgroundMutationIR] = []
+    for spec in cdc_cfg.get("background_mutations", []) or []:
+        sets = tuple(
+            (attr, ValueSource("generated", generator=_compile_generator(gspec)))
+            for attr, gspec in spec["set"].items()
+        )
+        rules.append(
+            BackgroundMutationIR(
+                name=str(spec["name"]),
+                probability_per_day=float(spec["rate"]["probability"]),
+                set_sources=sets,
+            )
+        )
+    return tuple(rules)
 
 
 def _compile_event_types(view: ManifestView) -> dict[str, EventTypeIR]:
@@ -380,6 +442,34 @@ def _compile_event_types(view: ManifestView) -> dict[str, EventTypeIR]:
             payload=payload,
         )
     return event_types
+
+
+# The manifest version at which the Phase-8 behavior set (intensity curves,
+# background mutations, CDC-image marker hygiene) becomes active. Pre-1.1.0
+# manifests run the Phase-3/4 semantics they were baselined under (P-6 immutable
+# versions; behavior-engine §3.4 "flat 1.0 before", §8 BE-F4).
+_PHASE8_MIN_VERSION = (1, 1, 0)
+
+
+def _version_tuple(version: str) -> tuple[int, ...]:
+    """Parse a dotted manifest version (``"1.1.0"``) to an int tuple for ordering.
+
+    Non-numeric or missing components sort as ``0`` so a malformed/empty version
+    (never produced by a Layer-1-valid manifest) conservatively reads as pre-Phase-8
+    — the safe default that never silently rebaselines an existing golden.
+    """
+    parts: list[int] = []
+    for segment in version.split("."):
+        try:
+            parts.append(int(segment))
+        except ValueError:
+            parts.append(0)
+    return tuple(parts)
+
+
+def _phase8_features_enabled(version: str) -> bool:
+    """``True`` iff the declared manifest version is ≥ 1.1.0 (Phase-8 behaviors on)."""
+    return _version_tuple(version) >= _PHASE8_MIN_VERSION
 
 
 def compile_manifest(
@@ -407,12 +497,32 @@ def compile_manifest(
         (r.name, r.source_entity, r.source_attribute, r.target_entity)
         for r in view.relationships
     )
+    one_to_one_seed_fks: dict[str, dict[str, tuple[str, str]]] = {}
+    for r in view.relationships:
+        if r.cardinality == "one_to_one":
+            one_to_one_seed_fks.setdefault(r.source_entity, {})[r.source_attribute] = (
+                r.name,
+                r.target_entity,
+            )
 
+    simulated_timezone = str(view.metadata.get("simulated_timezone", "UTC"))
+    version = str(view.metadata.get("version", ""))
+    phase8 = _phase8_features_enabled(version)
+    # Pre-Phase-8 manifests keep the flat arrival schedule even if they forward-declare
+    # an `intensity` section (the 1.0.0 subset does): the curve was inert before Phase 8
+    # and GOLD-A is baselined against the flat schedule (behavior-engine §3.4).
+    intensity = (
+        compile_intensity(view.intensity, tz_name=simulated_timezone)
+        if phase8
+        else compile_intensity(None, tz_name=simulated_timezone)
+    )
     return ManifestIR(
         slug=view.slug,
-        version=str(view.metadata.get("version", "")),
+        version=version,
         actor_entity=view.actor_entity,
-        simulated_timezone=str(view.metadata.get("simulated_timezone", "UTC")),
+        simulated_timezone=simulated_timezone,
+        intensity=intensity,
+        phase8_features=phase8,
         entities=_compile_entities(view),
         entity_order=tuple(view.entity_order),
         event_types=_compile_event_types(view),
@@ -420,6 +530,7 @@ def compile_manifest(
         session_machine=session_machine,
         lifecycle_by_entity=lifecycle_by_entity,
         relationships=relationships,
+        one_to_one_seed_fks=one_to_one_seed_fks,
         seeding=seeding,
         schema_versions=dict(schema_versions or {}),
     )

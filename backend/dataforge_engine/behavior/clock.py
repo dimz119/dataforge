@@ -84,14 +84,54 @@ class VirtualClock:
         self.mode = mode
         self.frontier_us = frontier_us
         self._segment: Segment | None = None
+        self._paused = False
 
     @property
     def is_backfill(self) -> bool:
         return self.mode == "backfill"
 
+    @property
+    def is_paused(self) -> bool:
+        """``True`` while frozen by :meth:`pause` (no segment advances virtual time)."""
+        return self._paused
+
+    @property
+    def position_us(self) -> int:
+        """The checkpointed clock position — ``F`` in simulated µs (§9.1 ``vclock``).
+
+        This is the single number resume anchors a new segment at: pause freezes
+        the clock here and resume rebases to ``(wall_resume, position_us)``. It is
+        exactly the generation frontier, so the checkpoint codec persists it as
+        ``frontier_us`` (the two are the same quantity, BE-C1..C3).
+        """
+        return self.frontier_us
+
     def open_segment(self, wall_now: datetime) -> None:
         """Open a run segment anchored at ``(wall_now, frontier_us)`` (start/resume)."""
         self._segment = Segment(wall_now, self.frontier_us, self.speed_multiplier)
+        self._paused = False
+
+    def pause(self) -> None:
+        """Freeze virtual time at the generation frontier (§9.2 pause T6, BE-C1).
+
+        Closes the active segment so ``virtual_now`` stops advancing — the clock is
+        pinned at ``frontier_us`` until :meth:`resume`. Idempotent; a clock that was
+        never started (no segment) simply records the paused flag. The frozen
+        position is what the pause checkpoint persists (the engine serializes
+        between passes, never mid-transaction)."""
+        self._segment = None
+        self._paused = True
+
+    def resume(self, wall_now: datetime) -> None:
+        """Re-anchor a fresh segment at ``(wall_now, frontier_us)`` (§9.3 step 4).
+
+        Resume opens a new run segment so ``virtual_now`` continues from the frozen
+        frontier — *rebasing* the elapsed wall time to "now" rather than counting
+        the paused gap. Dwell timers (absolute virtual due-times) need no
+        recomputation: the clock was frozen, so they fire at the same simulated
+        instants relative to the rebased segment. In-flight funnels continue with
+        zero ``sequence_no`` gaps (T8)."""
+        self.open_segment(wall_now)
 
     def virtual_now_us(self, wall_now: datetime) -> int:
         """``virtual_now`` in simulated µs since epoch (live mode only)."""

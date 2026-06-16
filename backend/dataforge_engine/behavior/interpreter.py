@@ -174,7 +174,10 @@ class Interpreter:
         entity_ir = self._ir.entities[effect.entity]
         cursor = traversal.rng.values
         # explicit set values first (declaration order), then unset declared attrs.
-        explicit = resolve_set(effect.set_sources, ctx, cursor, self._pools)
+        explicit = resolve_set(
+            effect.set_sources, ctx, cursor, self._pools,
+            strip_markers=self._ir.phase8_features,
+        )
         attributes = self._generate_attributes(entity_ir, ctx, cursor, explicit)
         key = self._mint_key(entity_ir.name, entity_ir.key_prefix, cursor)
         attributes[entity_ir.key_attribute] = key
@@ -199,7 +202,10 @@ class Interpreter:
         assert effect.target is not None
         _t, record = ctx.resolve_entity_ref(effect.target)
         before = record.row_image()
-        values = resolve_set(effect.set_sources, ctx, traversal.rng.values, self._pools)
+        values = resolve_set(
+            effect.set_sources, ctx, traversal.rng.values, self._pools,
+            strip_markers=self._ir.phase8_features,
+        )
         record.attributes.update(values)
         record.entity_version += 1
         record.updated_at = ctx.now_iso()
@@ -256,7 +262,10 @@ class Interpreter:
 
     def _effect_remember(self, effect: Effect, ctx: BindingContext, traversal: Traversal) -> None:
         assert effect.key is not None
-        value = resolve_set(effect.set_sources, ctx, traversal.rng.values, self._pools)
+        value = resolve_set(
+            effect.set_sources, ctx, traversal.rng.values, self._pools,
+            strip_markers=self._ir.phase8_features,
+        )
         if effect.mode == "append":
             existing = traversal.memory.setdefault(effect.key, [])
             if isinstance(existing, list):
@@ -480,6 +489,7 @@ class Interpreter:
                 expr_resolver=ctx.resolve_path,
             )
             gctx.siblings.setdefault("__now__", ctx.now_iso())
+            gctx.siblings.setdefault("__virtual_epoch_ms__", ctx.virtual_epoch_ms())
             value = gen(cursor, gctx)
             attributes[attr_name] = value
             rel = getattr(gen, "__df_relationship__", None)

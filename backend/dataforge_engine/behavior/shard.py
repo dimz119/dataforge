@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 from dataforge_engine.envelope import event_id_for
 from dataforge_engine.seeds import SeedTree
 
+from .background import US_PER_DAY, BackgroundMutationDriver
 from .clock import VirtualClock
 from .interpreter import Interpreter
 from .pools import EntityPools
@@ -92,7 +93,18 @@ class Shard:
         self._arrival = ArrivalProcess(
             Cursor(self._tree.key("transitions", f"arrival:{config.shard_id}"))
         )
+        # Background mutations (R-CDC-3): CDC-only chain-root drift, swept once per
+        # simulated day. The driver is inert when no entity declares rules.
+        self._bg = BackgroundMutationDriver(
+            ir, self._pools, self._vclock, self._tree, self._identity, self._sequence,
+        )
         self._seeded = False
+        # Optional simulated-µs horizon after which no *new* arrival is scheduled —
+        # the in-flight lifecycles still drain to ``until_us`` (BE-A: arrivals are a
+        # self-perpetuating chain, so capping the chain bounds the session population
+        # while every spawned lifecycle completes). ``None`` = arrivals run for the
+        # whole window (the default; backfill density is otherwise BE-F4-fixed).
+        self._arrival_until_us: int | None = None
 
     # -- properties for hosts ----------------------------------------------
 
@@ -207,14 +219,72 @@ class Shard:
             overrides=self._config.catalog_overrides,
         )
         self._schedule_first_arrival()
+        self._schedule_background_day(0)
         return snapshots
 
+    # -- background mutations (R-CDC-3) ------------------------------------
+
+    def _schedule_background_day(self, day_index: int) -> None:
+        """Push the ``background_day`` planning timer for simulated day ``day_index``.
+
+        The planner runs at the day's *start* ``v = day_index . US_PER_DAY`` so the
+        per-instance within-day offsets fall inside the same day. It carries the
+        index so the next day re-arms when processed (self-perpetuating, like
+        arrivals). Inert when no rule is declared (no timer is ever pushed).
+        """
+        if not self._bg.has_rules:
+            return
+        due = day_index * US_PER_DAY
+        self._heap.push(due, "background_day", {"day_index": day_index})
+
+    def _handle_background_day(self, timer: Timer) -> list[InternalEnvelope]:
+        """Plan one simulated day: push a ``bg_mutation`` timer per firing.
+
+        Each firing emits exactly one CDC event at fire time (≤ 1 envelope per heap
+        pop, so the generate-loop headroom check is never violated). The next day's
+        planner is armed unconditionally — the heap window/budget bounds the cadence.
+        """
+        day_index = int(timer.ref.get("day_index", 0))
+        for due, ref in self._bg.plan_day(day_index):
+            self._heap.push(due, "bg_mutation", ref)
+        self._schedule_background_day(day_index + 1)
+        return []
+
+    def _handle_bg_mutation(self, timer: Timer, emitted_at: datetime) -> list[InternalEnvelope]:
+        return self._bg.fire(timer.ref, emitted_at=emitted_at)
+
     # -- arrivals (§3.5, BE-A1) --------------------------------------------
+
+    def _backfill_catalog_size(self) -> int:
+        """The actor catalog size that drives backfill arrival density (BE-F4).
+
+        BE-F4 fixes backfill ``rho`` *for the whole dataset*: it is the **seeded**
+        actor catalog size — the manifest ``seeding.catalogs`` default for the actor
+        entity, overridable per instance within the declared min/max — not the live
+        pool count. Using the live count lets ``user_registered`` creates inflate
+        ``rho`` over the window, producing a secular session-volume ramp that bends the
+        diurnal/weekly shape (STAT-SHAPE-2) and overshoots the PRD E7 / admission-estimate
+        envelope (``simulated_days x catalog_size x visits x mes``, behavior-engine §3.5).
+        Derived purely from manifest + config, so it is restore-stable by construction.
+
+        This is a **Phase-8 backfill-arrival semantic**, gated on
+        ``phase8_features`` alongside the intensity curves and background mutations it
+        composes with (§3.4/§3.5): pre-1.1.0 published manifests keep the live-count
+        behavior they were golden-baselined under (GOLD-A byte-stability, P-6/INV-GEN-3),
+        while the 1.1.0 full manifest gets the spec-correct fixed density.
+        """
+        actor = self._ir.actor_entity
+        overrides = self._config.catalog_overrides or {}
+        return int(overrides.get(actor, self._ir.seeding.get(actor, 0)))
 
     def _rho(self) -> float:
         """Base arrival density rho (sessions per simulated second)."""
         if self._vclock.is_backfill:
-            catalog = self._pools.count(self._ir.actor_entity)
+            catalog = (
+                self._backfill_catalog_size()
+                if self._ir.phase8_features
+                else self._pools.count(self._ir.actor_entity)
+            )
             return catalog * self._config.visits_per_actor_day / 86_400.0
         mes = self._config.mean_events_per_session
         tps = self._current_tps()
@@ -226,10 +296,27 @@ class Shard:
         # uses a flat target carried in config for batch/golden (§3.6).
         return self._config.target_tps
 
+    def _next_arrival_us(self) -> int | None:
+        """Solve the next arrival µs under ``λ(v) = rho x intensity(v)`` (§3.4/§3.5).
+
+        Routes through the renormalized diurnal x weekly curve from the IR. A flat
+        curve (no manifest `intensity`) reduces to the constant-rate solve, so
+        ``target_tps`` stays the exact daily average; a declared curve reshapes
+        *when* arrivals land without moving the daily mean (mean-1.0 renorm)."""
+        return self._arrival.next_arrival_us_curved(
+            self._rho(), self._ir.intensity, self._vclock.virtual_epoch_ms
+        )
+
+    def _schedule_arrival(self, due: int | None) -> None:
+        """Push the next arrival timer unless it lands past the arrival horizon."""
+        if due is None:
+            return
+        if self._arrival_until_us is not None and due > self._arrival_until_us:
+            return
+        self._heap.push(due, "arrival", {"index": self._arrival.state.next_index - 1})
+
     def _schedule_first_arrival(self) -> None:
-        due = self._arrival.next_arrival_us(self._rho())
-        if due is not None:
-            self._heap.push(due, "arrival", {"index": self._arrival.state.next_index - 1})
+        self._schedule_arrival(self._next_arrival_us())
 
     def _handle_arrival(self, timer: Timer) -> list[InternalEnvelope]:
         v = timer.virtual_due_at
@@ -237,13 +324,11 @@ class Shard:
         if actor_key is not None:
             self._start_session(actor_key, v)
         # schedule the next arrival immediately (§3.5 step 3).
-        due = self._arrival.next_arrival_us(self._rho())
-        if due is not None:
-            self._heap.push(due, "arrival", {"index": self._arrival.state.next_index - 1})
+        self._schedule_arrival(self._next_arrival_us())
         return []  # the session's first event comes from its own dwell timer
 
     def _bind_actor(self, arrival_index: int) -> str | None:
-        """BE-A1: index i₀ = ⌊u·N⌋ then circular scan to first eligible actor."""
+        """BE-A1: index i₀ = ⌊u.N⌋ then circular scan to first eligible actor."""
         registry = self._pools.pool(self._ir.actor_entity).creation_order
         n = len(registry)
         if n == 0:
@@ -308,6 +393,10 @@ class Shard:
             self._vclock.advance_frontier(timer.virtual_due_at)
             if timer.kind == "arrival":
                 batch.extend(self._handle_arrival(timer))
+            elif timer.kind == "background_day":
+                batch.extend(self._handle_background_day(timer))
+            elif timer.kind == "bg_mutation":
+                batch.extend(self._handle_bg_mutation(timer, emitted_at))
             else:
                 batch.extend(self._interp.interpret(timer, emitted_at=emitted_at))
         return batch
@@ -321,6 +410,7 @@ class Shard:
         until_us: int | None = None,
         ledger: LedgerSink | None = None,
         pass_size: int = 500,
+        arrival_until_us: int | None = None,
     ) -> list[InternalEnvelope]:
         """Unpaced generation to completion (backfill / batch finalization, §8).
 
@@ -328,7 +418,16 @@ class Shard:
         of ``pass_size`` events until the heap is empty, ``until_us`` is crossed
         (window end, BE-F3), or ``max_events`` is reached. Appends each pass to the
         ``ledger`` durably before returning (INV-GEN-5) when a sink is supplied.
+
+        ``arrival_until_us`` (optional) stops scheduling *new* arrivals once the
+        arrival chain crosses that simulated-µs horizon while ``until_us`` still drains
+        every spawned lifecycle to completion — the "fixed session population, full
+        lifecycle maturity" shape of the testing-strategy §5.2 funnel/latency batch A
+        (50k sessions whose lifecycles fully resolve, so realized parent→child ratios
+        are not understated by window-edge truncation). Defaults to ``None`` (arrivals
+        run for the whole window), so backfill datasets are unaffected.
         """
+        self._arrival_until_us = arrival_until_us
         window_end = until_us if until_us is not None else _MAX_VIRTUAL_US
         produced: list[InternalEnvelope] = []
         head = self.seed()
