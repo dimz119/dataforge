@@ -22,12 +22,23 @@ export {
 
 // Log-scale TPS helpers + plan caps (shared by the slider and the create form).
 export { tpsToPosition, positionToTps, clampTps, TPS_MIN, TPS_MAX } from './tpsScale';
-export { perStreamTpsCap } from './planCaps';
+export {
+  perStreamTpsCap,
+  backfillDaysCap,
+  SPEED_MULTIPLIER_MIN,
+  SPEED_MULTIPLIER_MAX,
+} from './planCaps';
 
 // Control-panel components (§9.5).
 export { StreamControlPanel, type StreamControlPanelProps } from './components/StreamControlPanel';
 export { LifecycleButtons, type LifecycleButtonsProps } from './components/LifecycleButtons';
 export { TpsSlider, type TpsSliderProps } from './components/TpsSlider';
+export {
+  VirtualClockSection,
+  type VirtualClockSectionProps,
+  type VirtualClockValue,
+  type StreamMode,
+} from './components/VirtualClockSection';
 export { PinSummary, type PinSummaryProps } from './components/PinSummary';
 export { StreamDangerZone, type StreamDangerZoneProps } from './components/StreamDangerZone';
 

@@ -39,11 +39,20 @@ class EventsQuerySerializer(serializers.Serializer[dict[str, Any]]):
         required=False, min_value=_LIMIT_MIN, max_value=_LIMIT_MAX, default=_LIMIT_DEFAULT
     )
     types = serializers.CharField(required=False, allow_blank=True)
+    # Per-entity CDC filter (R-CDC-7, Phase 8): both or neither, ≤ 256 chars each
+    # (the entity_key bound). Matched against entity_refs; identical to the WS frame.
+    entity_type = serializers.CharField(required=False, allow_blank=False, max_length=64)
+    entity_key = serializers.CharField(required=False, allow_blank=False, max_length=256)
 
     def validate(self, attrs: dict[str, Any]) -> dict[str, Any]:
         if attrs.get("cursor") and attrs.get("from"):
             raise serializers.ValidationError(
                 {"cursor": "Provide either 'cursor' or 'from', not both."}
+            )
+        # R-CDC-7 "both or neither" — a half-specified entity filter is ambiguous.
+        if bool(attrs.get("entity_type")) != bool(attrs.get("entity_key")):
+            raise serializers.ValidationError(
+                {"entity_type": "Provide both 'entity_type' and 'entity_key', or neither."}
             )
         return attrs
 

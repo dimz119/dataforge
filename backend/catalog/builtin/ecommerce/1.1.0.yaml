@@ -1,0 +1,930 @@
+# DataForge builtin scenario — e-commerce, FULL 8-entity manifest (1.1.0).
+#
+# This file is DATA, not code (HARD RULE: zero e-commerce logic in Python). It is
+# the §10.2 builtin manifest registered by `manage.py sync_builtin_scenarios`,
+# copied verbatim from the normative §2 manifest of
+# specs/04-engines/scenarios/ecommerce.md (paper-validated at Phase 0). It is the
+# full 8-entity simulation that registers at Phase 8 alongside the Phase-3 subset
+# 1.0.0 (which stays published for existing instances, INV-CAT-1/5):
+#   * entities users / products / orders / payments / refunds / inventory /
+#     shipments / reviews (users WITH `status` -> cdc.users v2 per §1.1);
+#   * 21 business event types; 5 state machines (1 session + 4 lifecycle);
+#   * cdc.entities for all 8 entities (default-enabled: users/products/orders/
+#     inventory) + background mutations + intensity curves (PRD §4.3);
+#   * ZERO `hook` generators (permanent assertion, P-4).
+# Valid against the Manifest v0 JSON Schema + Layers 1+2 (L3/engine-execution
+# capability lands with the generalized-guards agent — see openQuestions).
+
+manifest_schema: v0
+
+metadata:
+  slug: ecommerce
+  version: 1.1.0
+  title: E-Commerce
+  description: >-
+    Reference business simulation: a retail storefront with users, a product
+    catalog, inventory, orders, payments, refunds, shipments, and reviews.
+    Implements the PRD default funnel (F1-F10), lifecycle latencies (L1-L8),
+    and retail intensity curves. Zero hooks (P-4).
+  actor_entity: users
+  simulated_timezone: UTC
+
+entities:
+
+  users:
+    description: Shoppers; the scenario's actor entity. CDC row image feeds exercise E4 (SCD2).
+    key_prefix: usr
+    key_attribute: user_id
+    attributes:
+      full_name:        { generator: person.full_name }
+      email:            { generator: person.email, params: { from: full_name } }
+      address:          { generator: address.full }
+      marketing_opt_in: { generator: choice.boolean, params: { p_true: 0.6 } }
+      status:           { generator: choice.uniform, params: { options: [active] } }   # 1.1.0 addition -> cdc.users v2
+
+  products:
+    description: Catalog items. Popularity skew comes from zipf selection at view time, not from the entity.
+    key_prefix: prd
+    key_attribute: product_id
+    attributes:
+      name:     { generator: commerce.product_name }
+      category: { generator: commerce.category, params: { depth: 2 } }
+      brand:    { generator: commerce.brand }
+      sku:      { generator: commerce.sku }
+      price:    { generator: commerce.price, params: { min: "3.99", max: "499.00", distribution: lognormal } }
+      active:   { generator: choice.boolean, params: { p_true: 0.95 } }
+
+  orders:
+    description: >-
+      One order per completed checkout. primary_product_id / item_count /
+      neg_item_count are denormalized accounting attributes copied from session
+      memory at creation (findings F-1, F-2): they let lifecycle effects and
+      guards reach the inventory row of the representative cart line.
+    key_prefix: ord
+    key_attribute: order_id
+    attributes:
+      user_id:            { generator: ref.fk, params: { relationship: order_user } }
+      primary_product_id: { generator: ref.fk, params: { relationship: order_primary_product } }
+      status:             { generator: choice.uniform, params: { options: [placed] } }
+      item_count:         { generator: number.int, params: { min: 1, max: 8 } }
+      neg_item_count:     { generator: number.int, params: { min: -8, max: -1 } }
+      total:              { generator: number.decimal, params: { min: "4.99", max: "4500.00", scale: 2 } }
+
+  payments:
+    description: Exactly one per order that reaches authorization (success or declined).
+    key_prefix: pay
+    key_attribute: payment_id
+    attributes:
+      order_id: { generator: ref.fk, params: { relationship: payment_order } }
+      user_id:  { generator: ref.fk, params: { relationship: payment_user } }
+      amount:   { generator: number.decimal, params: { min: "4.99", max: "4500.00", scale: 2 } }
+      method:   { generator: choice.weighted, params: { options: [
+                    { value: card,      weight: 70 },
+                    { value: paypal,    weight: 15 },
+                    { value: apple_pay, weight: 10 },
+                    { value: gift_card, weight: 5 } ] } }
+      status:   { generator: choice.uniform, params: { options: [authorized] } }
+
+  refunds:
+    description: At most one per order; created only from cancellation, loss, or in-window return paths (structural gate).
+    key_prefix: rfd
+    key_attribute: refund_id
+    attributes:
+      order_id: { generator: ref.fk, params: { relationship: refund_order } }
+      user_id:  { generator: ref.fk, params: { relationship: refund_user } }
+      amount:   { generator: number.decimal, params: { min: "4.99", max: "4500.00", scale: 2 } }
+      status:   { generator: choice.uniform, params: { options: [requested] } }
+      reason:   { generator: choice.uniform, params: { options: [product_return] } }
+
+  inventory:
+    description: >-
+      Exactly one row per product (inventory_product is one_to_one; seed
+      catalogs are equal-sized so seeding yields a bijection). stock is the
+      only adjusted attribute; non-negativity is enforced by the behavior
+      engine's pool mutation rule (PRD §4.4), see §6 F-3.
+    key_prefix: inv
+    key_attribute: inventory_id
+    attributes:
+      product_id: { generator: ref.fk, params: { relationship: inventory_product } }
+      stock:      { generator: number.int, params: { min: 80, max: 500 } }
+      warehouse:  { generator: choice.uniform, params: { options: [east, west, central] } }
+
+  shipments:
+    description: >-
+      One per fulfilled order. user_id / primary_product_id / total are
+      denormalized from the order at creation so that downstream effects
+      (reviews, refunds) can be expressed with 1-segment context paths
+      (finding F-4: context paths cannot traverse relationships).
+    key_prefix: shp
+    key_attribute: shipment_id
+    attributes:
+      order_id:           { generator: ref.fk, params: { relationship: shipment_order } }
+      user_id:            { generator: ref.fk, params: { relationship: shipment_user } }
+      primary_product_id: { generator: ref.fk, params: { relationship: shipment_product } }
+      total:              { generator: number.decimal, params: { min: "4.99", max: "4500.00", scale: 2 } }
+      carrier:            { generator: choice.weighted, params: { options: [
+                              { value: ups,   weight: 35 },
+                              { value: fedex, weight: 30 },
+                              { value: usps,  weight: 25 },
+                              { value: dhl,   weight: 10 } ] } }
+      tracking_number:    { generator: template, params: { pattern: "1Z{#upper4}{#digits8}" } }
+      status:             { generator: choice.uniform, params: { options: [created] } }
+      delivered_at:       { generator: time.between, params: { start: P0D, end: P0D } }   # placeholder until delivery; see §6 F-6
+
+  reviews:
+    description: Created on the F8 path; review_lifecycle deletes ~2% (moderation) emitting cdc.reviews op d when enabled.
+    key_prefix: rev
+    key_attribute: review_id
+    attributes:
+      user_id:    { generator: ref.fk, params: { relationship: review_user } }
+      product_id: { generator: ref.fk, params: { relationship: review_product } }
+      order_id:   { generator: ref.fk, params: { relationship: review_order } }
+      rating:     { generator: choice.weighted, params: { options: [
+                      { value: 5, weight: 45 },
+                      { value: 4, weight: 30 },
+                      { value: 3, weight: 12 },
+                      { value: 2, weight: 6 },
+                      { value: 1, weight: 7 } ] } }
+      title:      { generator: text.sentence, params: { max_words: 8 } }
+      body:       { generator: text.paragraph, params: { max_sentences: 3 } }
+
+relationships:
+  - { name: order_user,            source_entity: orders,    source_attribute: user_id,            target_entity: users,    cardinality: many_to_one, on_target_delete: restrict }
+  - { name: order_primary_product, source_entity: orders,    source_attribute: primary_product_id, target_entity: products, cardinality: many_to_one, on_target_delete: restrict }
+  - { name: payment_order,         source_entity: payments,  source_attribute: order_id,           target_entity: orders,   cardinality: one_to_one,  on_target_delete: restrict, owned: true }
+  - { name: payment_user,          source_entity: payments,  source_attribute: user_id,            target_entity: users,    cardinality: many_to_one, on_target_delete: restrict }
+  - { name: refund_order,          source_entity: refunds,   source_attribute: order_id,           target_entity: orders,   cardinality: one_to_one,  on_target_delete: restrict, owned: true }
+  - { name: refund_user,           source_entity: refunds,   source_attribute: user_id,            target_entity: users,    cardinality: many_to_one, on_target_delete: restrict }
+  - { name: inventory_product,     source_entity: inventory, source_attribute: product_id,         target_entity: products, cardinality: one_to_one,  on_target_delete: restrict }
+  - { name: shipment_order,        source_entity: shipments, source_attribute: order_id,           target_entity: orders,   cardinality: one_to_one,  on_target_delete: restrict, owned: true }
+  - { name: shipment_user,         source_entity: shipments, source_attribute: user_id,            target_entity: users,    cardinality: many_to_one, on_target_delete: restrict }
+  - { name: shipment_product,      source_entity: shipments, source_attribute: primary_product_id, target_entity: products, cardinality: many_to_one, on_target_delete: restrict }
+  - { name: review_user,           source_entity: reviews,   source_attribute: user_id,            target_entity: users,    cardinality: many_to_one, on_target_delete: restrict }
+  - { name: review_product,        source_entity: reviews,   source_attribute: product_id,         target_entity: products, cardinality: many_to_one, on_target_delete: restrict }
+  - { name: review_order,          source_entity: reviews,   source_attribute: order_id,           target_entity: orders,   cardinality: one_to_one,  on_target_delete: restrict }
+
+event_types:
+
+  # ---- session funnel -------------------------------------------------------
+  session_started:
+    description: Chain root of every session (event-model C-1).
+    partition_by: actor
+    payload:
+      user_id:    { from: actor.user_id }
+      channel:    { generated: { generator: choice.weighted, params: { options: [
+                      { value: web,        weight: 55 },
+                      { value: mobile_app, weight: 30 },
+                      { value: mobile_web, weight: 15 } ] } } }
+      ip_address: { generated: { generator: internet.ip_v4 } }
+      user_agent: { generated: { generator: internet.user_agent } }
+
+  user_registered:
+    description: A new account created mid-session; pairs with cdc.users op c (R-CDC-2).
+    partition_by: actor
+    payload:
+      user_id:          { from: created.users.user_id }
+      email:            { from: created.users.email }
+      full_name:        { from: created.users.full_name }
+      marketing_opt_in: { from: created.users.marketing_opt_in }
+      referral_channel: { generated: { generator: choice.weighted, params: { options: [
+                            { value: organic,     weight: 40 },
+                            { value: paid_search, weight: 25 },
+                            { value: social,      weight: 20 },
+                            { value: referral,    weight: 15 } ] } } }
+
+  product_viewed:
+    description: One per view; zipf product selection gives catalog popularity skew.
+    partition_by: actor
+    payload:
+      user_id:    { from: actor.user_id }
+      product_id: { from: session.last_viewed.product_id }
+      price:      { from: session.last_viewed.unit_price }
+
+  cart_item_added:
+    description: Field set frozen by event-model §7.3. Quantity is always 1 (one line per add; §6 F-8).
+    partition_by: actor
+    payload:
+      user_id:    { from: actor.user_id }
+      product_id: { from: session.last_viewed.product_id }
+      quantity:   { const: 1 }
+      unit_price: { from: session.last_viewed.unit_price }
+
+  cart_abandoned:
+    description: Emitted only for non-empty carts (F3 complement); empty-cart sessions exit silently.
+    partition_by: actor
+    payload:
+      user_id:    { from: actor.user_id }
+      items:      { from: session.cart_items }
+      item_count: { from: session.cart_units.units }
+      cart_value: { generated: { generator: derived.expr, params: {
+                      expr: "round(sum(session.cart_items[].unit_price), 2)", output: decimal, scale: 2 } } }
+
+  checkout_started:
+    partition_by: actor
+    payload:
+      user_id:    { from: actor.user_id }
+      items:      { from: session.cart_items }
+      item_count: { from: session.cart_units.units }
+      subtotal:   { generated: { generator: derived.expr, params: {
+                      expr: "round(sum(session.cart_items[].unit_price), 2)", output: decimal, scale: 2 } } }
+
+  order_placed:
+    description: >-
+      Payload derives byte-identically to registry subject ecommerce.order_placed
+      version 1 (schema-registry §9.2) — order_id, user_id, items, currency,
+      subtotal, shipping_fee, total, shipping_country, in this order.
+    partition_by: actor
+    payload:
+      order_id:         { from: created.orders.order_id }
+      user_id:          { from: actor.user_id }
+      items:            { from: session.cart_items }
+      currency:         { const: "USD" }
+      subtotal:         { generated: { generator: derived.expr, params: {
+                            expr: "round(sum(session.cart_items[].unit_price), 2)", output: decimal, scale: 2 } } }
+      shipping_fee:     { generated: { generator: derived.expr, params: {
+                            expr: "4.99", output: decimal, scale: 2 } } }
+      total:            { generated: { generator: derived.expr, params: {
+                            expr: "round(sum(session.cart_items[].unit_price) + 4.99, 2)", output: decimal, scale: 2 } } }
+      shipping_country: { from: actor.address.country }
+
+  # ---- order lifecycle ------------------------------------------------------
+  payment_authorized:
+    description: Subject is the order; the payment row is created by the same transition.
+    partition_by: actor
+    payload:
+      payment_id: { from: created.payments.payment_id }
+      order_id:   { from: subject.order_id }
+      user_id:    { from: subject.user_id }
+      amount:     { from: subject.total }
+      method:     { from: created.payments.method }
+      currency:   { const: "USD" }
+
+  payment_failed:
+    partition_by: actor
+    payload:
+      payment_id:     { from: created.payments.payment_id }
+      order_id:       { from: subject.order_id }
+      user_id:        { from: subject.user_id }
+      amount:         { from: subject.total }
+      method:         { from: created.payments.method }
+      failure_reason: { generated: { generator: choice.weighted, params: { options: [
+                          { value: insufficient_funds, weight: 45 },
+                          { value: card_declined,      weight: 30 },
+                          { value: expired_card,       weight: 15 },
+                          { value: fraud_suspected,    weight: 10 } ] } } }
+
+  order_cancelled:
+    description: >-
+      Emitted from two contexts (failed payment; fulfillment cancellation) —
+      the payload is the intersection resolvable in both (MAN-V105); the cause
+      is recoverable from the preceding event via causation_id (§6 F-5).
+    partition_by: actor
+    payload:
+      order_id: { from: subject.order_id }
+      user_id:  { from: subject.user_id }
+      total:    { from: subject.total }
+
+  inventory_adjusted:
+    description: Stock reservation at payment authorization; delta is negative (reservation rule).
+    partition_by: actor
+    payload:
+      order_id:   { from: subject.order_id }
+      product_id: { from: subject.primary_product_id }
+      delta:      { from: subject.neg_item_count }
+      reason:     { const: order_reservation }
+
+  inventory_restocked:
+    description: Reservation release when a reserved order is cancelled (F6 path); delta is positive.
+    partition_by: actor
+    payload:
+      order_id:   { from: subject.order_id }
+      product_id: { from: subject.primary_product_id }
+      delta:      { from: subject.item_count }
+      reason:     { const: order_cancelled }
+
+  shipment_created:
+    partition_by: actor
+    payload:
+      shipment_id:     { from: created.shipments.shipment_id }
+      order_id:        { from: subject.order_id }
+      user_id:         { from: subject.user_id }
+      carrier:         { from: created.shipments.carrier }
+      tracking_number: { from: created.shipments.tracking_number }
+
+  # ---- shipment lifecycle ---------------------------------------------------
+  shipment_shipped:
+    description: Carrier pickup; subject is the shipment.
+    partition_by: actor
+    payload:
+      shipment_id:     { from: subject.shipment_id }
+      order_id:        { from: subject.order_id }
+      carrier:         { from: subject.carrier }
+      tracking_number: { from: subject.tracking_number }
+
+  shipment_delivered:
+    partition_by: actor
+    payload:
+      shipment_id:  { from: subject.shipment_id }
+      order_id:     { from: subject.order_id }
+      user_id:      { from: subject.user_id }
+      delivered_at: { from: subject.delivered_at }
+
+  shipment_lost:
+    description: Emitted by the 3% loss edge and by the 14-day L3 timeout edge (same context).
+    partition_by: actor
+    payload:
+      shipment_id:     { from: subject.shipment_id }
+      order_id:        { from: subject.order_id }
+      carrier:         { from: subject.carrier }
+      tracking_number: { from: subject.tracking_number }
+
+  review_submitted:
+    partition_by: actor
+    payload:
+      review_id:  { from: created.reviews.review_id }
+      user_id:    { from: subject.user_id }
+      product_id: { from: subject.primary_product_id }
+      order_id:   { from: subject.order_id }
+      rating:     { from: created.reviews.rating }
+      title:      { from: created.reviews.title }
+      body:       { from: created.reviews.body }
+
+  # ---- refunds ---------------------------------------------------------------
+  refund_requested:
+    description: >-
+      Emitted from three contexts (fulfillment cancellation: subject=order;
+      loss and in-window return: subject=shipment). Every field reads from
+      created.refunds.*, which resolves identically in all three (MAN-V105)
+      and carries the per-path reason set at creation (§6 F-5 workaround).
+    partition_by: actor
+    payload:
+      refund_id: { from: created.refunds.refund_id }
+      order_id:  { from: created.refunds.order_id }
+      user_id:   { from: created.refunds.user_id }
+      amount:    { from: created.refunds.amount }
+      reason:    { from: created.refunds.reason }
+
+  refund_approved:
+    partition_by: actor
+    payload:
+      refund_id: { from: subject.refund_id }
+      order_id:  { from: subject.order_id }
+      amount:    { from: subject.amount }
+      reason:    { from: subject.reason }
+
+  refund_denied:
+    partition_by: actor
+    payload:
+      refund_id:     { from: subject.refund_id }
+      order_id:      { from: subject.order_id }
+      amount:        { from: subject.amount }
+      denial_reason: { generated: { generator: choice.weighted, params: { options: [
+                         { value: outside_window,  weight: 40 },
+                         { value: item_used,       weight: 35 },
+                         { value: fraud_suspected, weight: 25 } ] } } }
+
+  # ---- account lifecycle -----------------------------------------------------
+  account_closed:
+    description: Sets users.status=closed; pairs with cdc.users op u. Hard deletes are blocked by order_user restrict.
+    partition_by: actor
+    payload:
+      user_id: { from: actor.user_id }
+      email:   { from: actor.email }
+
+state_machines:
+
+  shopping_session:
+    type: session
+    binds: users
+    initial: arrived
+    session_timeout: PT30M
+    states:
+
+      arrived:                              # probabilities sum to exactly 1.0
+        transitions:
+          - to: registering
+            probability: 0.08
+            emit: session_started
+            override: { allowed: true, min: 0.0, max: 0.30 }
+          - to: landing
+            probability: 0.915
+            emit: session_started
+            override: { allowed: true, min: 0.50, max: 1.0 }
+          - to: closing_account
+            probability: 0.005
+            emit: session_started
+            override: { allowed: true, min: 0.0, max: 0.05 }
+
+      registering:
+        transitions:
+          - to: landing
+            probability: 1.0
+            dwell: { family: lognormal, median: PT45S, p95: PT3M }
+            effects:
+              - { action: create, entity: users, set: {} }     # all attributes from declared generators; status=active
+            emit: user_registered
+            override: { allowed: false }
+
+      closing_account:
+        transitions:
+          - to: account_closed_exit
+            probability: 1.0
+            dwell: { family: lognormal, median: PT1M, p95: PT5M }
+            effects:
+              - { action: update, target: actor, set: { status: { const: closed }, marketing_opt_in: { const: false } } }
+            emit: account_closed
+            override: { allowed: false }
+
+      account_closed_exit: { terminal: true }
+
+      landing:                              # F1 -- every session views >= 1 product
+        transitions:
+          - to: viewed_nocart
+            probability: 1.0
+            dwell: { family: lognormal, median: PT5S, p95: PT30S }
+            effects:
+              - action: remember
+                key: last_viewed
+                mode: set
+                value:
+                  product_id: { generated: { generator: ref.fk, params: { relationship: inventory_product, selection: zipf, s: 1.1 } } }
+                  unit_price: { generated: { generator: ref.attr, params: { via: product_id, attribute: price } } }
+            emit: product_viewed
+            override: { allowed: false }
+
+      viewed_nocart:                        # F2 -- 20% add-to-cart per view (sum 1.0)
+        transitions:
+          - to: browsing_cart
+            probability: 0.20
+            dwell: { family: lognormal, median: PT15S, p95: PT90S }
+            effects:
+              - action: remember
+                key: cart_items
+                mode: append
+                value:
+                  product_id: { from: session.last_viewed.product_id }
+                  quantity:   { const: 1 }
+                  unit_price: { from: session.last_viewed.unit_price }
+              - action: remember
+                key: last_added
+                mode: set
+                value:
+                  product_id: { from: session.last_viewed.product_id }
+              - action: remember
+                key: cart_units
+                mode: set
+                value:
+                  units:     { generated: { generator: derived.expr, params: { expr: "count(session.cart_items[].product_id)", output: integer } } }
+                  neg_units: { generated: { generator: derived.expr, params: { expr: "0 - count(session.cart_items[].product_id)", output: integer } } }
+            emit: cart_item_added
+            override: { allowed: true, min: 0.01, max: 0.60 }
+          - to: browsing_nocart
+            probability: 0.80
+            override: { allowed: true, min: 0.40, max: 0.99 }
+
+      browsing_nocart:                      # geometric browse loop, mean 4 views (continue p=0.75)
+        remainder: exit                     # 25% stop browsing with an empty cart -- silent session end
+        transitions:
+          - to: viewed_nocart
+            probability: 0.75
+            dwell: { family: lognormal, median: PT20S, p95: PT2M }    # L7
+            effects:
+              - action: remember
+                key: last_viewed
+                mode: set
+                value:
+                  product_id: { generated: { generator: ref.fk, params: { relationship: inventory_product, selection: zipf, s: 1.1 } } }
+                  unit_price: { generated: { generator: ref.attr, params: { via: product_id, attribute: price } } }
+            emit: product_viewed
+            override: { allowed: true, min: 0.10, max: 0.95 }
+
+      viewed_cart:                          # same add decision, cart already non-empty (sum 1.0)
+        transitions:
+          - to: browsing_cart
+            probability: 0.20
+            dwell: { family: lognormal, median: PT15S, p95: PT90S }
+            effects:
+              - action: remember
+                key: cart_items
+                mode: append
+                value:
+                  product_id: { from: session.last_viewed.product_id }
+                  quantity:   { const: 1 }
+                  unit_price: { from: session.last_viewed.unit_price }
+              - action: remember
+                key: last_added
+                mode: set
+                value:
+                  product_id: { from: session.last_viewed.product_id }
+              - action: remember
+                key: cart_units
+                mode: set
+                value:
+                  units:     { generated: { generator: derived.expr, params: { expr: "count(session.cart_items[].product_id)", output: integer } } }
+                  neg_units: { generated: { generator: derived.expr, params: { expr: "0 - count(session.cart_items[].product_id)", output: integer } } }
+            emit: cart_item_added
+            override: { allowed: true, min: 0.01, max: 0.60 }
+          - to: browsing_cart
+            probability: 0.80
+            override: { allowed: true, min: 0.40, max: 0.99 }
+
+      browsing_cart:                        # browse loop with a non-empty cart (sum 1.0)
+        transitions:
+          - to: viewed_cart
+            probability: 0.75
+            dwell: { family: lognormal, median: PT20S, p95: PT2M }    # L7
+            effects:
+              - action: remember
+                key: last_viewed
+                mode: set
+                value:
+                  product_id: { generated: { generator: ref.fk, params: { relationship: inventory_product, selection: zipf, s: 1.1 } } }
+                  unit_price: { generated: { generator: ref.attr, params: { via: product_id, attribute: price } } }
+            emit: product_viewed
+            override: { allowed: true, min: 0.10, max: 0.95 }
+          - to: cart_review
+            probability: 0.25
+            dwell: { family: lognormal, median: PT30S, p95: PT3M }
+            override: { allowed: true, min: 0.05, max: 0.90 }
+
+      cart_review:                          # F3 -- evaluated once per session with >= 1 cart item (sum 1.0)
+        # F12 anchor: P(cart)=0.500 exactly (geometric browse), so order-per-session
+        # realizes 0.995 x 0.500 x 0.47 x 0.70 ~= 16.5% -- the testing-strategy STAT-F12
+        # target, inside the PRD-fixed band [14%,19%]. (Resolves ecommerce.md Open
+        # question 1: the exact-chain 0.40 value realized ~13.9%, below the PRD floor;
+        # checkout-conversion is the lever that keeps F4=order/checkout untouched.)
+        transitions:
+          - to: checkout
+            probability: 0.47
+            dwell: { family: lognormal, median: PT1M, p95: PT5M }
+            emit: checkout_started
+            override: { allowed: true, min: 0.05, max: 0.95 }
+          - to: abandoned_cart
+            probability: 0.53
+            dwell: { family: lognormal, median: PT2M, p95: PT10M }
+            emit: cart_abandoned
+            override: { allowed: true, min: 0.05, max: 0.95 }
+
+      abandoned_cart: { terminal: true }
+
+      checkout:                             # F4 -- 70% place the order; remainder 30% abandon at checkout
+        remainder: exit
+        transitions:
+          - to: order_done
+            probability: 0.70
+            dwell: { family: lognormal, median: PT3M, p95: PT12M }    # L8
+            effects:
+              - action: create
+                entity: orders
+                set:
+                  user_id:            { from: actor.user_id }
+                  primary_product_id: { from: session.last_added.product_id }
+                  status:             { const: placed }
+                  item_count:         { from: session.cart_units.units }
+                  neg_item_count:     { from: session.cart_units.neg_units }
+                  total:              { generated: { generator: derived.expr, params: {
+                                          expr: "round(sum(session.cart_items[].unit_price) + 4.99, 2)", output: decimal, scale: 2 } } }
+            emit: order_placed
+            override: { allowed: true, min: 0.10, max: 0.95 }
+      order_done: { terminal: true }
+
+  order_lifecycle:                          # spawned when an orders entity is created
+    type: lifecycle
+    binds: orders
+    initial: placed
+    states:
+
+      placed:                               # F5 + L1; stock guard = the reservation rule
+        timeout: { after: PT30M, to: failed_payment }   # L1 hard bound; cancellation emitted by failed_payment
+        transitions:
+          - to: reserving
+            probability: 0.95
+            dwell: { family: lognormal, median: PT45S, p95: PT10M }   # L1
+            guard:
+              all:
+                - exists:
+                    relationship: inventory_product
+                    of: subject.via.order_primary_product
+                    where:
+                      - { attribute: stock, op: gte, ref: subject.item_count }
+            effects:
+              - action: create
+                entity: payments
+                set:
+                  order_id: { from: subject.order_id }
+                  user_id:  { from: subject.user_id }
+                  amount:   { from: subject.total }
+                  status:   { const: authorized }
+              - { action: update, target: subject, set: { status: { const: authorized } } }
+            emit: payment_authorized
+            override: { allowed: true, min: 0.50, max: 1.0 }
+          - to: failed_payment
+            probability: 0.05
+            dwell: { family: lognormal, median: PT45S, p95: PT10M }
+            effects:
+              - action: create
+                entity: payments
+                set:
+                  order_id: { from: subject.order_id }
+                  user_id:  { from: subject.user_id }
+                  amount:   { from: subject.total }
+                  status:   { const: declined }
+              - { action: update, target: subject, set: { status: { const: payment_failed } } }
+            emit: payment_failed
+            override: { allowed: true, min: 0.0, max: 0.50 }
+
+      reserving:                            # reservation: decrement stock of the order's primary product
+        transitions:
+          - to: awaiting_fulfillment
+            probability: 1.0
+            effects:
+              - action: adjust
+                target: subject.via.order_primary_product.via.inventory_product
+                attribute: stock
+                by: subject.neg_item_count
+            emit: inventory_adjusted
+            override: { allowed: false }
+
+      failed_payment:
+        transitions:
+          - to: closed_cancelled
+            probability: 1.0
+            dwell: { family: lognormal, median: PT5M, p95: PT30M }
+            effects:
+              - { action: update, target: subject, set: { status: { const: cancelled } } }
+            emit: order_cancelled
+            override: { allowed: false }
+
+      awaiting_fulfillment:                 # F6 + L2 (sum 1.0)
+        transitions:
+          - to: fulfilling
+            probability: 0.98
+            dwell: { family: lognormal, median: PT18H, p95: PT48H }   # L2
+            guard:
+              all:
+                - exists:
+                    relationship: payment_order
+                    of: subject
+                    where:
+                      - { attribute: status, op: eq, value: authorized }
+            effects:
+              - action: create
+                entity: shipments
+                set:
+                  order_id:           { from: subject.order_id }
+                  user_id:            { from: subject.user_id }
+                  primary_product_id: { from: subject.primary_product_id }
+                  total:              { from: subject.total }
+                  status:             { const: created }
+              - { action: update, target: subject, set: { status: { const: fulfilling } } }
+            emit: shipment_created
+            override: { allowed: true, min: 0.50, max: 1.0 }
+          - to: cancel_refund
+            probability: 0.02
+            dwell: { family: lognormal, median: PT6H, p95: PT24H }
+            effects:
+              - { action: update, target: subject, set: { status: { const: cancelled } } }
+            emit: order_cancelled
+            override: { allowed: true, min: 0.0, max: 0.50 }
+
+      cancel_refund:                        # F6 cancellation settlement → reservation release
+        # A pre-fulfillment cancellation reverses the captured payment but emits no
+        # `refund_requested`: PRD §4.4 / ADR-0007 make a refund structurally impossible
+        # without a *delivered or lost* shipment (PROP-RI-3 — the canonical invariant),
+        # so the reversal is recorded by the preceding `order_cancelled` plus the
+        # reservation release (`inventory_restocked`) here, not by a refund event.
+        transitions:
+          - to: restock_after_cancel
+            probability: 1.0
+            dwell: { family: lognormal, median: PT1H, p95: PT6H }
+            override: { allowed: false }
+
+      restock_after_cancel:                 # release the reservation
+        transitions:
+          - to: closed_cancelled
+            probability: 1.0
+            effects:
+              - action: adjust
+                target: subject.via.order_primary_product.via.inventory_product
+                attribute: stock
+                by: subject.item_count
+            emit: inventory_restocked
+            override: { allowed: false }
+
+      fulfilling: { terminal: true }        # shipment_lifecycle carries the saga from here
+      closed_cancelled: { terminal: true }
+
+  shipment_lifecycle:                       # spawned when a shipments entity is created
+    type: lifecycle
+    binds: shipments
+    initial: created
+    states:
+
+      created:
+        transitions:
+          - to: in_transit
+            probability: 1.0
+            dwell: { family: lognormal, median: PT12H, p95: PT36H }   # carrier pickup; first half of L3
+            effects:
+              - { action: update, target: subject, set: { status: { const: in_transit } } }
+            emit: shipment_shipped
+            override: { allowed: false }
+
+      in_transit:                           # F7 + remainder of L3 (sum 1.0); 14 d hard bound
+        timeout: { after: P14D, to: lost, emit: shipment_lost }
+        transitions:
+          - to: delivered
+            probability: 0.97
+            dwell: { family: lognormal, median: P2D, p95: P5D }       # 12h + 2d ~= L3 median 2.5d, p95 6d
+            effects:
+              - { action: update, target: subject, set: { status: { const: delivered }, delivered_at: { generated: { generator: time.now } } } }
+              - { action: update, target: subject.via.shipment_order, set: { status: { const: completed } } }
+            emit: shipment_delivered
+            override: { allowed: true, min: 0.50, max: 1.0 }
+          - to: lost
+            probability: 0.03
+            dwell: { family: lognormal, median: P4D, p95: P10D }
+            emit: shipment_lost
+            override: { allowed: true, min: 0.0, max: 0.50 }
+
+      delivered:                            # F8 review 25% / F9 refund 5% / remainder 70% exit
+        remainder: exit
+        transitions:
+          - to: reviewed
+            probability: 0.25
+            dwell: { family: lognormal, median: P3D, p95: P14D }      # L4
+            effects:
+              - action: create
+                entity: reviews
+                set:
+                  user_id:    { from: subject.user_id }
+                  product_id: { from: subject.primary_product_id }
+                  order_id:   { from: subject.order_id }
+            emit: review_submitted
+            override: { allowed: true, min: 0.0, max: 0.80 }
+          - to: refund_requested_exit
+            probability: 0.05
+            dwell: { family: lognormal, median: P4D, p95: P21D }      # L5
+            guard:
+              all:
+                - { path: subject.status, op: eq, value: delivered }
+                - { path: subject.delivered_at, op: within, value: P30D }   # 30-day return window (plugin spec §6.3 idiom)
+            effects:
+              - action: create
+                entity: refunds
+                set:
+                  order_id: { from: subject.order_id }
+                  user_id:  { from: subject.user_id }
+                  amount:   { from: subject.total }
+                  status:   { const: requested }
+                  reason:   { const: product_return }
+            emit: refund_requested
+            override: { allowed: true, min: 0.0, max: 0.50 }
+
+      lost:                                 # loss auto-triggers a refund (F7 note)
+        transitions:
+          - to: closed_lost
+            probability: 1.0
+            dwell: { family: lognormal, median: PT12H, p95: PT48H }
+            effects:
+              - { action: update, target: subject, set: { status: { const: lost } } }
+              - action: create
+                entity: refunds
+                set:
+                  order_id: { from: subject.order_id }
+                  user_id:  { from: subject.user_id }
+                  amount:   { from: subject.total }
+                  status:   { const: requested }
+                  reason:   { const: shipment_lost }
+            emit: refund_requested
+            override: { allowed: false }
+
+      reviewed: { terminal: true }
+      refund_requested_exit: { terminal: true }
+      closed_lost: { terminal: true }
+
+  refund_lifecycle:                         # spawned when a refunds entity is created
+    type: lifecycle
+    binds: refunds
+    initial: requested
+    states:
+
+      requested:                            # F10 + L6 (sum 1.0); 7 d auto-approve hard bound
+        timeout: { after: P7D, to: auto_approving }
+        transitions:
+          - to: approved
+            probability: 0.80
+            dwell: { family: lognormal, median: P1D, p95: P3D }       # L6
+            effects:
+              - { action: update, target: subject, set: { status: { const: approved } } }
+              - { action: update, target: subject.via.refund_order, set: { status: { const: refunded } } }
+            emit: refund_approved
+            override: { allowed: true, min: 0.10, max: 1.0 }
+          - to: denied
+            probability: 0.20
+            dwell: { family: lognormal, median: P1D, p95: P3D }
+            effects:
+              - { action: update, target: subject, set: { status: { const: denied } } }
+            emit: refund_denied
+            override: { allowed: true, min: 0.0, max: 0.90 }
+
+      auto_approving:                       # timeout edges carry no effects (§6 F-7); chain the mutation here
+        transitions:
+          - to: approved
+            probability: 1.0
+            effects:
+              - { action: update, target: subject, set: { status: { const: approved } } }
+              - { action: update, target: subject.via.refund_order, set: { status: { const: refunded } } }
+            emit: refund_approved
+            override: { allowed: false }
+
+      approved: { terminal: true }
+      denied: { terminal: true }
+
+  review_lifecycle:                         # spawned when a reviews entity is created; moderation deletes
+    type: lifecycle
+    binds: reviews
+    initial: published
+    states:
+      published:
+        remainder: exit                     # 98% of reviews persist
+        transitions:
+          - to: removed
+            probability: 0.02
+            dwell: { family: lognormal, median: P1D, p95: P7D }
+            effects:
+              - { action: delete, target: subject }    # cdc.reviews op d when enabled; no business event
+            override: { allowed: true, min: 0.0, max: 0.20 }
+      removed: { terminal: true }
+
+cdc:
+  entities:                                 # all 8 entities are CDC-capable (one subject each, R-DER-1);
+    users:                                  # enabled_default marks the out-of-the-box emission set
+      enabled_default: true
+      ops: [c, u]                           # account closure is an update; hard delete blocked by order_user restrict
+      background_mutations:
+        - name: address_change              # exercise E4 (SCD2): 0.5%/entity/simulated-day
+          rate: { per: entity_day, probability: 0.005 }
+          set: { address: { generator: address.full } }
+    products:
+      enabled_default: true
+      ops: [c, u]
+      background_mutations:
+        - name: price_change                # 1%/entity/day repricing -- products SCD2 material
+          rate: { per: entity_day, probability: 0.01 }
+          set: { price: { generator: commerce.price, params: { min: "3.99", max: "499.00", distribution: lognormal } } }
+    orders:
+      enabled_default: true
+      ops: [c, u]                           # status walk: placed -> authorized -> fulfilling -> completed/cancelled/refunded
+    inventory:
+      enabled_default: true
+      ops: [c, u]
+      background_mutations:
+        - name: restock                     # warehouse replenishment to a target level, daily
+          rate: { per: entity_day, probability: 1.0 }
+          set: { stock: { generator: number.int, params: { min: 150, max: 600 } } }
+    payments:
+      enabled_default: false
+      ops: [c, u]
+    refunds:
+      enabled_default: false
+      ops: [c, u]
+    shipments:
+      enabled_default: false
+      ops: [c, u]
+    reviews:
+      enabled_default: false
+      ops: [c, d]                           # the only op-d emitter (review_lifecycle moderation delete)
+
+intensity:                                  # PRD §4.3 exactly; engine renormalizes each curve to mean 1.0
+  diurnal:
+    - { from_hour: 0,  to_hour: 6,  multiplier: 0.30 }
+    - { from_hour: 6,  to_hour: 9,  multiplier: 0.70 }
+    - { from_hour: 9,  to_hour: 12, multiplier: 1.00 }
+    - { from_hour: 12, to_hour: 14, multiplier: 1.25 }
+    - { from_hour: 14, to_hour: 17, multiplier: 1.00 }
+    - { from_hour: 17, to_hour: 20, multiplier: 1.55 }
+    - { from_hour: 20, to_hour: 22, multiplier: 1.80 }
+    - { from_hour: 22, to_hour: 24, multiplier: 0.80 }
+  weekly: { mon: 0.90, tue: 0.90, wed: 0.95, thu: 1.00, fri: 1.10, sat: 1.20, sun: 1.00 }
+
+seeding:
+  catalogs:                                 # products and inventory must stay equal-sized (1:1 bijection)
+    users:     { default: 5000, min: 100, max: 100000 }
+    products:  { default: 1000, min: 50,  max: 100000 }
+    inventory: { default: 1000, min: 50,  max: 100000 }
+
+chaos_defaults:                             # all OFF (PRD §8 guardrail); rates/params mirror chaos-engine §3.2
+  duplicates:       { enabled: false, rate: 0.05,
+                      params: { copies: [ { count: 1, weight: 1.0 } ],
+                                spacing: { mode: adjacent }, event_types: ["*"] } }
+  late_arriving:    { enabled: false, rate: 0.03,
+                      params: { delay: { family: lognormal, median: PT30M, p95: PT2H },
+                                max_delay: PT24H, event_types: ["*"] } }
+  missing:          { enabled: false, rate: 0.01, params: { event_types: ["*"] } }
+  out_of_order:     { enabled: false, rate: 0.10, params: { window: PT60S, event_types: ["*"] } }
+  corrupted_values: { enabled: false, rate: 0.02,
+                      params: { fields: ["*"], kinds: ["*"], max_fields_per_event: 1, event_types: ["*"] } }
+  nulls:            { enabled: false, rate: 0.02,
+                      params: { fields: ["*"], include_nullable: false, max_fields_per_event: 1, event_types: ["*"] } }
+  schema_drift:     { enabled: false, rate: 0.20, params: { subjects: ["*"], fields: ["*"] } }

@@ -15,7 +15,8 @@ import pytest
 
 from catalog.application import ingest
 from registry.infra.canonical import canonical_bytes, comparison_form, fingerprint
-from registry.infra.derive import derive_subjects
+from registry.infra.compat import check_backward_additive
+from registry.infra.derive import derive_subjects, document_for_version
 
 _BUILTIN = (
     Path(__file__).resolve().parents[2]
@@ -24,11 +25,17 @@ _BUILTIN = (
     / "ecommerce"
     / "1.0.0.yaml"
 )
+_BUILTIN_1_1_0 = _BUILTIN.parent / "1.1.0.yaml"
 
 
 @pytest.fixture(scope="module")
 def manifest() -> dict[str, Any]:
     return ingest.canonicalize(_BUILTIN.read_text(encoding="utf-8")).document
+
+
+@pytest.fixture(scope="module")
+def manifest_1_1_0() -> dict[str, Any]:
+    return ingest.canonicalize(_BUILTIN_1_1_0.read_text(encoding="utf-8")).document
 
 
 def _subject(subjects: list[Any], name: str) -> Any:
@@ -97,3 +104,97 @@ def test_derivation_order_is_deterministic(manifest: dict[str, Any]) -> None:
     # Business events precede CDC subjects.
     first_cdc = next(i for i, s in enumerate(derive_subjects(manifest)) if s.is_cdc)
     assert all(not s.is_cdc for s in derive_subjects(manifest)[:first_cdc])
+
+
+# --- REQ-RULE: version-N (N ≥ 2) derivation (schema-registry §4.1/§5.1/§5.3) ----
+
+
+def test_v2_derivation_adds_field_to_properties_not_required(
+    manifest: dict[str, Any], manifest_1_1_0: dict[str, Any]
+) -> None:
+    """cdc.users v2 (1.1.0 adds ``status``) puts ``status`` in properties, NOT required.
+
+    The normative §1.1 case: deriving the v2 candidate for a subject that already has
+    a registered latest (v1) must carry ``required`` forward EXACTLY (REQ-RULE) and
+    leave the new field optional, so the §6 BACKWARD_ADDITIVE gate accepts it as an
+    additive minor bump. This is the bug the fix closes — the old derivation made
+    every property required at every version, tripping REG-C003 on any addition.
+    """
+    v1 = _subject(derive_subjects(manifest), "ecommerce.cdc.users").document
+    derived_v2 = _subject(derive_subjects(manifest_1_1_0), "ecommerce.cdc.users")
+
+    candidate = document_for_version(
+        derived_v2,
+        latest_required=list(v1["required"]),
+        latest_properties=dict(v1["properties"]),
+        next_version=2,
+    )
+
+    # The new field is present in properties, absent from required.
+    assert "status" in candidate["properties"]
+    assert "status" not in candidate["required"]
+    # REQ-RULE: required(2) == required(1) EXACTLY (carried forward, sorted).
+    assert candidate["required"] == sorted(v1["required"])
+    assert set(candidate["required"]) == set(v1["required"])
+    # Existing fields keep their fragment unchanged (frozen — REG-C002 safe).
+    assert candidate["properties"]["user_id"] == v1["properties"]["user_id"]
+    # §5.3: the new optional field carries x-df-binding (its manifest declaration).
+    assert "x-df-binding" in candidate["properties"]["status"]
+    # The versioned header is stamped to v2.
+    assert candidate["title"] == "ecommerce.cdc.users v2"
+    assert candidate["$id"].endswith("/ecommerce.cdc.users/versions/2.json")
+
+
+def test_v2_derivation_passes_backward_additive_gate(
+    manifest: dict[str, Any], manifest_1_1_0: dict[str, Any]
+) -> None:
+    """The REQ-RULE v2 candidate is BACKWARD_ADDITIVE-compatible with v1 (empty errors)."""
+    v1 = _subject(derive_subjects(manifest), "ecommerce.cdc.users").document
+    derived_v2 = _subject(derive_subjects(manifest_1_1_0), "ecommerce.cdc.users")
+    candidate = document_for_version(
+        derived_v2,
+        latest_required=list(v1["required"]),
+        latest_properties=dict(v1["properties"]),
+        next_version=2,
+    )
+    assert check_backward_additive(v1, candidate) == []
+
+
+def test_v2_derivation_with_required_field_would_trip_c003(
+    manifest: dict[str, Any], manifest_1_1_0: dict[str, Any]
+) -> None:
+    """Sanity: a v2 candidate that DOES mark the new field required trips REG-C003.
+
+    Confirms the gate (and the test above) is meaningful — the only thing keeping
+    the addition additive is REQ-RULE keeping ``status`` out of ``required``.
+    """
+    v1 = _subject(derive_subjects(manifest), "ecommerce.cdc.users").document
+    derived_v2 = _subject(derive_subjects(manifest_1_1_0), "ecommerce.cdc.users")
+    candidate = document_for_version(
+        derived_v2,
+        latest_required=list(v1["required"]),
+        latest_properties=dict(v1["properties"]),
+        next_version=2,
+    )
+    candidate["required"] = sorted([*candidate["required"], "status"])  # violate REQ-RULE
+    assert "REG-C003" in {e.code for e in check_backward_additive(v1, candidate)}
+
+
+def test_unchanged_subject_rederives_byte_identically(manifest: dict[str, Any]) -> None:
+    """An UNCHANGED subject re-derives identically (R-DER-4 fingerprint match → no-op).
+
+    The §1.1 ``order_placed`` claim: re-deriving the v2 candidate for a subject whose
+    row image did not change yields the v1 comparison form byte-for-byte (no
+    new fields → no x-df-binding, required carried forward), so the fingerprint
+    matches and Flow 1 registers nothing.
+    """
+    op = _subject(derive_subjects(manifest), "ecommerce.order_placed").document
+    derived = _subject(derive_subjects(manifest), "ecommerce.order_placed")
+    candidate = document_for_version(
+        derived,
+        latest_required=list(op["required"]),
+        latest_properties=dict(op["properties"]),
+        next_version=2,
+    )
+    assert fingerprint(candidate) == fingerprint(op)
+    assert canonical_bytes(comparison_form(candidate)) == canonical_bytes(comparison_form(op))

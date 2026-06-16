@@ -90,6 +90,11 @@ class StreamEventsConsumer(AsyncJsonWebsocketConsumer):  # type: ignore[misc]
     # frames; production uses the §6.5 contract value (SEND_QUEUE_CAP = 1000).
     queue_capacity: int = SEND_QUEUE_CAP
 
+    # Per-entity CDC filter defaults (R-CDC-7) at class scope so the filter predicate
+    # is safe to read before ``connect()`` arms them (``connect`` overrides per socket).
+    _entity_type: str | None = None
+    _entity_key: str | None = None
+
     @classmethod
     async def encode_json(cls, content: Any) -> str:
         """Render an S→C frame to JSON text, S-6-faithful for delivered envelopes.
@@ -120,6 +125,10 @@ class StreamEventsConsumer(AsyncJsonWebsocketConsumer):  # type: ignore[misc]
         self._slot: Any = None
         self._fingerprint = fingerprint_for(stream_id=self._stream_id, types=())
         self._types: tuple[str, ...] = ()
+        # Phase 8 per-entity CDC filter (R-CDC-7); both or neither, fixed for the
+        # socket's life (WS-5). Matched against entity_refs identically to REST.
+        self._entity_type: str | None = None
+        self._entity_key: str | None = None
         self._sample_rate = 1.0
         self._delivered = 0
         self._dropped = 0
@@ -211,10 +220,13 @@ class StreamEventsConsumer(AsyncJsonWebsocketConsumer):  # type: ignore[misc]
 
         self._parse_filters(frame)
         # The connection's filter-bound fingerprint (WS-5: filters fixed for the
-        # socket's life) — every minted cursor binds to (stream, filter set) so the
-        # client's REST gap-fill decodes against the same page query (RC-7).
+        # socket's life) — every minted cursor binds to (stream, filter set, entity)
+        # so the client's REST gap-fill decodes against the same page query (RC-7).
         self._fingerprint = fingerprint_for(
-            stream_id=self._stream_id, types=self._types
+            stream_id=self._stream_id,
+            types=self._types,
+            entity_type=self._entity_type,
+            entity_key=self._entity_key,
         )
 
         # WS-4 connection quota (5/key, 250/workspace → 4429).
@@ -234,6 +246,8 @@ class StreamEventsConsumer(AsyncJsonWebsocketConsumer):  # type: ignore[misc]
                 cursor=position_cursor,
                 types=self._types,
                 sample_rate=self._sample_rate,
+                entity_type=self._entity_type,
+                entity_key=self._entity_key,
             )
         )
         self._last_cursor = position_cursor
@@ -250,7 +264,12 @@ class StreamEventsConsumer(AsyncJsonWebsocketConsumer):  # type: ignore[misc]
             self._tasks.append(asyncio.create_task(self._revocation_watch()))
 
     def _parse_filters(self, frame: dict[str, Any]) -> None:
-        """Parse ``types`` (≤ 20, WS-5) + ``sample_rate`` ∈ (0,1] from the auth frame."""
+        """Parse ``types`` (≤ 20, WS-5) + ``sample_rate`` ∈ (0,1] + the per-entity
+        CDC filter (``entity_type``/``entity_key``, R-CDC-7) from the auth frame.
+
+        The per-entity filter is honored only when BOTH fields are present (the §4.9.1
+        "both or neither" rule, identical to REST); a half-specified pair is ignored.
+        """
         raw_types = frame.get("types")
         if isinstance(raw_types, list):
             cleaned = [str(t) for t in raw_types[:MAX_TYPES_FILTER] if t]
@@ -260,6 +279,11 @@ class StreamEventsConsumer(AsyncJsonWebsocketConsumer):  # type: ignore[misc]
             rate = float(raw_rate)
             if 0.0 < rate <= 1.0:
                 self._sample_rate = rate
+        ent_type = frame.get("entity_type")
+        ent_key = frame.get("entity_key")
+        if isinstance(ent_type, str) and ent_type and isinstance(ent_key, str) and ent_key:
+            self._entity_type = ent_type
+            self._entity_key = ent_key
 
     def _admit(self) -> bool:
         from delivery.infra.ws_connections import ConnectionSlot, admit_connection
@@ -459,8 +483,21 @@ class StreamEventsConsumer(AsyncJsonWebsocketConsumer):  # type: ignore[misc]
         self._queue.put(QueuedFrame(frame=notice, resume_cursor=None))
 
     def _passes_filters(self, event: dict[str, Any]) -> bool:
-        """WS-5: ``types`` exact match (SINK-12) + uniform ``sample_rate`` sampling."""
-        if self._types and str(event.get("event_type")) not in self._types:
+        """WS-5: ``types`` + per-entity CDC (R-CDC-7) match + uniform sampling.
+
+        The ``types``/``entity_refs`` predicate is the SHARED
+        :func:`delivery.domain.event_filter.envelope_matches` the REST channel uses,
+        guaranteeing IDENTICAL filter sets across channels (XCH); ``sample_rate`` is the
+        WS-only debug-tail thinning applied after the deterministic filter.
+        """
+        from delivery.domain import event_filter
+
+        if not event_filter.envelope_matches(
+            event,
+            types=self._types,
+            entity_type=self._entity_type,
+            entity_key=self._entity_key,
+        ):
             return False
         if self._sample_rate < 1.0:
             import random

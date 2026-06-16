@@ -67,6 +67,16 @@ class StreamEventsView(APIView):
             ),
             OpenApiParameter("limit", int, description="Page size 1..1000 (default 100)."),
             OpenApiParameter("types", str, description="Comma list, ≤20 event-type filter."),
+            OpenApiParameter(
+                "entity_type",
+                str,
+                description="Per-entity CDC filter (R-CDC-7); pair with entity_key.",
+            ),
+            OpenApiParameter(
+                "entity_key",
+                str,
+                description="Per-entity CDC filter (R-CDC-7); pair with entity_type.",
+            ),
         ],
         responses={200: serializers.EventsPageSerializer},
     )
@@ -87,6 +97,8 @@ class StreamEventsView(APIView):
             cursor=validated.get("cursor"),
             from_spec=validated.get("from"),
             types=tuple(validated.get("types", ())),
+            entity_type=validated.get("entity_type"),
+            entity_key=validated.get("entity_key"),
         )
         try:
             page = services.read_events(query)

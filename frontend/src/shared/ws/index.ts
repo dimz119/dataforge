@@ -27,4 +27,4 @@ export {
   DEFAULT_BUFFER_SIZE,
   FLUSH_INTERVAL_MS,
 } from './sampling';
-export { gapFill, type GapFillResult } from './gapfill';
+export { gapFill, type GapFillResult, type GapFillFilters } from './gapfill';

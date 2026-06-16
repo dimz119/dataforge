@@ -21,7 +21,15 @@ from typing import TYPE_CHECKING, Any, Literal
 if TYPE_CHECKING:
     from datetime import datetime
 
+    from .intensity import IntensityCurve
     from .rng import Cursor
+
+# Arrival inversion steps the piecewise-constant intensity by simulated hour
+# boundaries (the finest breakpoint of d'(h) x w'(j); day edges are hour edges).
+_US_PER_HOUR = 3_600 * 1_000_000
+# Hard cap on segment steps per arrival solve — a positive-but-tiny intensity over
+# a very low rho could otherwise walk many hours; bounded so the solve terminates.
+_MAX_SOLVE_HOURS = 24 * 366
 
 TimerKind = Literal[
     "arrival", "dwell", "state_timeout", "session_timeout", "background_day", "bg_mutation"
@@ -142,6 +150,50 @@ class ArrivalProcess:
         self.state.next_index += 1
         self.state.solve_from_us = due
         return due
+
+    def next_arrival_us_curved(
+        self,
+        rho: float,
+        curve: IntensityCurve,
+        virtual_epoch_ms: int,
+    ) -> int | None:
+        """Next arrival µs under ``λ(v) = rho x intensity(v)`` (§3.4/§3.5 step 2).
+
+        Solves ``∫_{vₙ₋₁}^{vₙ} λ(v) dv = Eₙ`` over the piecewise-constant curve by
+        stepping simulated-hour segments — the finest breakpoint of ``d'(h) x w'(j)``
+        (day edges coincide with hour edges). Within a segment of rate ``λₛ`` and
+        remaining mass ``E``: if ``λₛ.Δ ≥ E`` the arrival lands at ``v + E/λₛ``; else
+        subtract ``λₛ.Δ`` and step to the next hour. Zero-intensity hours are skipped
+        (they schedule no arrivals — they contribute no mass). The flat-curve fast
+        path delegates to :meth:`next_arrival_us` (a single division), so the
+        renormalized mean-1.0 curve reproduces the flat schedule on average exactly.
+        """
+        if rho <= 0.0:
+            return None
+        if curve.is_flat:
+            return self.next_arrival_us(rho)
+        u = self._cursor.u()
+        gap_mass = -math.log(1.0 - min(u, 1.0 - 2.0**-53))
+        self.state.next_index += 1
+        v = self.state.solve_from_us
+        remaining = gap_mass
+        for _ in range(_MAX_SOLVE_HOURS):
+            intensity = curve.at(v, virtual_epoch_ms)
+            rate = rho * intensity  # sessions per simulated second within the hour
+            # Δ to the next hour boundary in simulated seconds.
+            hour_end_us = (v // _US_PER_HOUR + 1) * _US_PER_HOUR
+            delta_seconds = (hour_end_us - v) / 1_000_000
+            segment_mass = rate * delta_seconds
+            if rate > 0.0 and segment_mass >= remaining:
+                v += int(remaining / rate * 1_000_000)
+                self.state.solve_from_us = v
+                return v
+            remaining -= segment_mass
+            v = hour_end_us
+        # Exhausted the step budget (vanishingly rare): land at the budget edge so
+        # the schedule stays deterministic rather than raising.
+        self.state.solve_from_us = v
+        return v
 
 
 # ---------------------------------------------------------------------------

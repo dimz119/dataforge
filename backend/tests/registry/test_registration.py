@@ -88,23 +88,35 @@ def test_identical_rederivation_registers_nothing(db: Any) -> None:
     assert SchemaVersion.objects.count() == 1
 
 
-def test_flow1_added_payload_field_trips_c003(db: Any) -> None:
-    """A manifest re-publish adding a payload field derives an all-required schema.
+def test_flow1_added_payload_field_registers_optional_v2(db: Any) -> None:
+    """A manifest re-publish adding a payload field registers v2 under REQ-RULE.
 
-    Because R-DER-3 makes every derived field ``required``, a new field changes the
-    required set → REG-C003. Manifest minor-version evolution (a field added with a
-    binding, NOT required) is the Flow-2 explicit-evolution command (Phase 10); a
-    Phase-3 re-publish is therefore byte-identical (no-op) or rejected. This pins
-    the §6.4 "the live Flow 1 failures are C001/C002/C003" contract.
+    The new field enters ``properties`` but NOT ``required`` (§4.1 REQ-RULE): the
+    required set is carried forward from v1 exactly, so the §6 ``required``-set check
+    (REG-C003) passes and the addition is accepted as an additive minor bump. The
+    added field carries an ``x-df-binding`` copied from its manifest valueSource
+    (§5.3), which is stripped from comparison form so it never affects the gate.
     """
     manifest = _manifest_with_one_event()
     _register(manifest)
+    v1 = SchemaVersion.objects.get(subject__subject="scn.thing", version=1)
+    assert set(v1.json_schema["required"]) == {"user_id"}
+
     evolved = copy.deepcopy(manifest)
     evolved["event_types"]["thing"]["payload"]["name"] = {"from": "actor.name"}
-    with pytest.raises(SchemaCompatibilityError) as exc:
-        _register(evolved)
-    assert any(e.code == "REG-C003" for e in exc.value.errors)
-    assert SchemaVersion.objects.filter(subject__subject="scn.thing").count() == 1
+    result = _register(evolved)
+
+    thing = next(r for r in result if r.subject == "scn.thing")
+    assert thing.created
+    assert thing.version == 2
+    v2 = SchemaVersion.objects.get(subject__subject="scn.thing", version=2)
+    # REQ-RULE: required unchanged from v1; the new field is optional.
+    assert set(v2.json_schema["required"]) == set(v1.json_schema["required"]) == {"user_id"}
+    assert "name" in v2.json_schema["properties"]
+    assert "name" not in v2.json_schema["required"]
+    # §5.3: the new optional field carries its manifest binding verbatim.
+    assert v2.json_schema["properties"]["name"]["x-df-binding"] == {"from": "actor.name"}
+    assert SchemaVersion.objects.filter(subject__subject="scn.thing").count() == 2
 
 
 def test_non_additive_change_raises_compat_error(db: Any) -> None:

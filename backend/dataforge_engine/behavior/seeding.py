@@ -94,6 +94,15 @@ def _seed_one(
     key_body = pools.next_key_hex(entity_ir.name, key_cursor.u64())
     key = f"{entity_ir.key_prefix}_{key_body}"
 
+    # one_to_one FK source attributes seed to a *bijection*: equal-sized catalogs over
+    # a one_to_one relationship pair the i-th source with the i-th target rather than
+    # drawing with replacement, so every row resolves to exactly one counterpart
+    # (behavior-engine §4.5; ecommerce.md §2 "seed catalogs are equal-sized so seeding
+    # yields a bijection"). The draw is still consumed (the value cursor stays in
+    # lockstep) — only the FK *value* is pinned, keeping every other seeded attribute
+    # byte-stable.
+    one_to_one = ir.one_to_one_seed_fks.get(entity_ir.name, {})
+
     attributes: dict[str, JSONValue] = {}
     ref_keys: dict[str, tuple[str, str]] = {}
     for attr_name, gen in entity_ir.attributes:
@@ -102,6 +111,12 @@ def _seed_one(
         )
         gctx.siblings.setdefault("__now__", now_iso)
         value = gen(value_cursor, gctx)
+        bijection = one_to_one.get(attr_name)
+        if bijection is not None:
+            _rel, target_entity = bijection
+            target_keys = pools.live_keys(target_entity)
+            if ordinal < len(target_keys):
+                value = target_keys[ordinal]
         attributes[attr_name] = value
         rel = getattr(gen, "__df_relationship__", None)
         if rel is not None and isinstance(value, str):

@@ -21,6 +21,13 @@ export interface GapFillResult {
   truncated: boolean;
 }
 
+/** The active tail filter set, resent on gap-fill so the bound cursor decodes (RC-7). */
+export interface GapFillFilters {
+  types?: string[];
+  entityType?: string;
+  entityKey?: string;
+}
+
 /**
  * Pull events over REST from `fromCursor` forward, stopping when we reach
  * `untilCursor` (the live tail position), exhaust the gap, or hit the page bound.
@@ -32,6 +39,7 @@ export async function gapFill(
   fromCursor: string,
   untilCursor: string | null,
   signal?: AbortSignal,
+  filters?: GapFillFilters,
 ): Promise<GapFillResult> {
   const events: DeliveredEnvelope[] = [];
   let cursor = fromCursor;
@@ -40,7 +48,20 @@ export async function gapFill(
   while (pages < MAX_GAP_PAGES) {
     if (signal?.aborted) break;
     const { data, error } = await api.GET('/api/v1/streams/{stream_id}/events', {
-      params: { path: { stream_id: streamId }, query: { cursor, limit: PAGE_LIMIT } },
+      params: {
+        path: { stream_id: streamId },
+        // The cursor's fingerprint binds to the filter set (RC-7); the gap-fill MUST
+        // resend the SAME types + per-entity CDC filter or the cursor fails to decode
+        // (400 cursor-invalid). This keeps REST gap-fill identical to the WS slice.
+        query: {
+          cursor,
+          limit: PAGE_LIMIT,
+          ...(filters?.types?.length ? { types: filters.types.join(',') } : {}),
+          ...(filters?.entityType && filters?.entityKey
+            ? { entity_type: filters.entityType, entity_key: filters.entityKey }
+            : {}),
+        },
+      },
       signal,
     });
     if (error) throw error as ApiError;

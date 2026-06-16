@@ -30,6 +30,9 @@ export interface AuthFrame {
   types?: string[];
   /** Uniform server-side sampling (WS-2), 0 < r ≤ 1. */
   sample_rate?: number;
+  /** Per-entity CDC filter (R-CDC-7, Phase 8); both or neither, matches entity_refs. */
+  entity_type?: string;
+  entity_key?: string;
 }
 
 /** Server → client frames (api-spec §5.2). */
@@ -38,7 +41,7 @@ export interface ReadyFrame {
   protocol: string;
   stream_id: string;
   position: { cursor: string };
-  filters: { types?: string[]; sample_rate?: number };
+  filters: { types?: string[]; sample_rate?: number; entity_type?: string; entity_key?: string };
 }
 
 export interface ResumeAckFrame {

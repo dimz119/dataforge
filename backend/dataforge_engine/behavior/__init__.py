@@ -14,6 +14,10 @@ depend on)::
         Shard, ShardConfig,
         # IR compiler
         ManifestIR, compile_manifest, compile_manifest_cached, clear_ir_cache,
+        # generalized guard vocabulary (§5): relationship-existence, attribute
+        # comparison, virtual-clock `within` window — all manifest-driven, no
+        # scenario branching; failed guards fall through to the remainder (§6.2).
+        Guard, Comparison, ExistsCondition, compile_guard, evaluate_guard,
         # checkpoint codec (§9)
         encode_checkpoint, encode_to_json, restore_checkpoint, CODEC_VERSION,
         # Layer-3 dry-run host (§8.4) — the seeded, bounded validation execution
@@ -31,12 +35,14 @@ modules so hosts wire I/O without importing the engine internals.
 
 from __future__ import annotations
 
+from .background import BackgroundMutationDriver
 from .checkpoint import (
     CODEC_VERSION,
     encode_checkpoint,
     encode_to_json,
     restore_checkpoint,
 )
+from .clock import VirtualClock
 from .dry_run import (
     EPS_FLOOR,
     SANDBOX_SEED,
@@ -44,34 +50,56 @@ from .dry_run import (
     run_dry_run,
 )
 from .errors import CheckpointError, CompileError, EngineError, GenerationError
+from .evaluate import evaluate_guard
+from .intensity import IntensityCurve, compile_intensity
 from .ir import (
+    BackgroundMutationIR,
+    Comparison,
+    ExistsCondition,
+    Guard,
     ManifestIR,
     clear_ir_cache,
+    compile_guard,
     compile_manifest,
     compile_manifest_cached,
 )
+from .scheduler import ArrivalProcess, ArrivalState
 from .shard import Shard, ShardConfig
-from .transaction import SequenceCounter, StreamIdentity
+from .transaction import Mutation, PoolTransaction, SequenceCounter, StreamIdentity
 
 __all__ = [
     "CODEC_VERSION",
     "EPS_FLOOR",
     "SANDBOX_SEED",
+    "ArrivalProcess",
+    "ArrivalState",
+    "BackgroundMutationDriver",
+    "BackgroundMutationIR",
     "CheckpointError",
+    "Comparison",
     "CompileError",
     "DryRunResult",
     "EngineError",
+    "ExistsCondition",
     "GenerationError",
+    "Guard",
+    "IntensityCurve",
     "ManifestIR",
+    "Mutation",
+    "PoolTransaction",
     "SequenceCounter",
     "Shard",
     "ShardConfig",
     "StreamIdentity",
+    "VirtualClock",
     "clear_ir_cache",
+    "compile_guard",
+    "compile_intensity",
     "compile_manifest",
     "compile_manifest_cached",
     "encode_checkpoint",
     "encode_to_json",
+    "evaluate_guard",
     "restore_checkpoint",
     "run_dry_run",
 ]

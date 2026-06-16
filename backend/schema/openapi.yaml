@@ -764,6 +764,16 @@ paths:
           type: string
         description: Opaque resume cursor (RC-7).
       - in: query
+        name: entity_key
+        schema:
+          type: string
+        description: Per-entity CDC filter (R-CDC-7); pair with entity_type.
+      - in: query
+        name: entity_type
+        schema:
+          type: string
+        description: Per-entity CDC filter (R-CDC-7); pair with entity_key.
+      - in: query
         name: from
         schema:
           type: string

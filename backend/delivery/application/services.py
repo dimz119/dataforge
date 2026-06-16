@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from delivery.domain import event_filter
 from delivery.domain.cursor import (
     CursorDecodeError,
     decode_cursor,
@@ -85,6 +86,10 @@ class EventsQuery:
     cursor: str | None = None
     from_spec: str | None = None  # "earliest" | "latest" | RFC-3339
     types: tuple[str, ...] = ()
+    # Phase 8 per-entity CDC filter (R-CDC-7): both or neither; matched against
+    # ``entity_refs`` with IDENTICAL semantics to the WS auth frame.
+    entity_type: str | None = None
+    entity_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -99,15 +104,28 @@ class EventsPage:
     next_cursor: str
 
 
-def canonical_filter_set(types: Sequence[str]) -> str:
+def canonical_filter_set(
+    types: Sequence[str],
+    *,
+    entity_type: str | None = None,
+    entity_key: str | None = None,
+) -> str:
     """The canonical filter-set string the fingerprint binds to (RC-4/RC-7).
 
     ``types`` → a sorted, comma-joined list (deduplicated); empty → ``""``. Sorting
     + dedup makes ``?types=b,a`` and ``?types=a,b,a`` the same filter set ⇒ one
     fingerprint ⇒ interchangeable cursors over an identical filter.
+
+    Phase 8: the per-entity CDC filter (``entity_type``/``entity_key``, R-CDC-7) is
+    part of the filter set too (P-3) — appended as ``e:{type}:{key}`` so a cursor
+    minted under an entity filter only replays under the SAME one. Restated
+    identically in :mod:`delivery.domain.ws_cursor` so REST + WS share one fingerprint.
     """
     cleaned = sorted({t for t in types if t})
-    return ",".join(cleaned)
+    base = ",".join(cleaned)
+    if entity_type and entity_key:
+        return f"{base}|e:{entity_type}:{entity_key}"
+    return base
 
 
 def read_events(query: EventsQuery, *, now: datetime | None = None) -> EventsPage:
@@ -119,7 +137,9 @@ def read_events(query: EventsQuery, *, now: datetime | None = None) -> EventsPag
     bound to this stream + filter set.
     """
     moment = (now or datetime.now(UTC)).astimezone(UTC)
-    filter_set = canonical_filter_set(query.types)
+    filter_set = canonical_filter_set(
+        query.types, entity_type=query.entity_type, entity_key=query.entity_key
+    )
     fingerprint = filter_fingerprint(
         stream_id=query.stream_id, canonical_filter_set=filter_set
     )
@@ -141,8 +161,15 @@ def read_events(query: EventsQuery, *, now: datetime | None = None) -> EventsPag
     wanted = set(query.types)
     data: list[dict[str, Any]] = []
     for row in page.rows:
-        if wanted and str(row.envelope.get("event_type")) not in wanted:
-            continue  # filtered-out: skipped server-side, cursor still advances (RC-4)
+        # The shared R-CDC-7 predicate (types ∧ per-entity), identical on REST + WS;
+        # filtered-out rows are skipped server-side but the cursor still advances (RC-4).
+        if not event_filter.envelope_matches(
+            row.envelope,
+            types=wanted,
+            entity_type=query.entity_type,
+            entity_key=query.entity_key,
+        ):
+            continue
         data.append(row.envelope)
 
     next_cursor = encode_cursor(p=page.next_p, s=page.next_s, fingerprint=fingerprint)

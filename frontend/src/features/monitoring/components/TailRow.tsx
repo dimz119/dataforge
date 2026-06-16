@@ -19,6 +19,24 @@ function readField(event: DeliveredEnvelope, ...keys: string[]): string | undefi
   return undefined;
 }
 
+/**
+ * CDC op → chip color (event-model §4: c create / u update / d delete / r snapshot).
+ * Distinct hues so a CDC stream is scannable at a glance (frontend-architecture §13).
+ */
+const OP_CHIP: Record<string, string> = {
+  c: 'bg-status-green/20 text-status-green',
+  u: 'bg-status-amber/20 text-status-amber',
+  d: 'bg-status-red/20 text-status-red',
+  r: 'bg-status-blue/20 text-status-blue',
+};
+
+const OP_LABEL: Record<string, string> = {
+  c: 'CDC create',
+  u: 'CDC update',
+  d: 'CDC delete',
+  r: 'CDC snapshot read',
+};
+
 /** Format an ISO occurred_at to a compact wall-clock time for the row. */
 function shortTime(iso: string | undefined): string {
   if (!iso) return '—';
@@ -59,7 +77,15 @@ export function TailRow({ event, expanded, onToggle }: TailRowProps) {
       <span className="inline-flex shrink-0 items-center gap-1 rounded bg-status-blue/15 px-1.5 py-0.5 font-medium text-status-blue">
         {eventType}
         {op && (
-          <span className="rounded bg-current/15 px-1 text-[10px] uppercase" title="CDC operation">
+          <span
+            data-testid="cdc-op-chip"
+            data-op={op}
+            className={cn(
+              'rounded px-1 text-[10px] font-semibold uppercase',
+              OP_CHIP[op] ?? 'bg-current/15',
+            )}
+            title={OP_LABEL[op] ?? 'CDC operation'}
+          >
             {op}
           </span>
         )}

@@ -48,28 +48,48 @@ __all__ = [
 ]
 
 
-def canonical_filter_set(types: Sequence[str]) -> str:
+def canonical_filter_set(
+    types: Sequence[str],
+    *,
+    entity_type: str | None = None,
+    entity_key: str | None = None,
+) -> str:
     """The canonical filter-set string the fingerprint binds to (RC-4/RC-7).
 
     Identical to the REST service's canonicalization (``delivery.application.services
     .canonical_filter_set``): ``types`` → a sorted, comma-joined, de-duplicated list;
-    empty → ``""``. Restated here (not imported) to keep this leaf module free of the
-    REST service's Django-touching imports while guaranteeing the SAME fingerprint —
-    the cross-channel cursor-interchange test asserts the two agree.
+    empty → ``""``; plus the Phase-8 per-entity CDC filter (R-CDC-7) appended as
+    ``|e:{type}:{key}`` when both are set. Restated here (not imported) to keep this
+    leaf module free of the REST service's Django-touching imports while guaranteeing
+    the SAME fingerprint — the cross-channel cursor-interchange test asserts agreement.
     """
     cleaned = sorted({t for t in types if t})
-    return ",".join(cleaned)
+    base = ",".join(cleaned)
+    if entity_type and entity_key:
+        return f"{base}|e:{entity_type}:{entity_key}"
+    return base
 
 
-def fingerprint_for(*, stream_id: str, types: Sequence[str]) -> str:
+def fingerprint_for(
+    *,
+    stream_id: str,
+    types: Sequence[str],
+    entity_type: str | None = None,
+    entity_key: str | None = None,
+) -> str:
     """The ``f`` fingerprint for a WS connection's (stream, filter set) (RC-7).
 
     Computed once per connection (the filter set is fixed for the socket's life,
     WS-5) and reused to mint every ``event``/``resume_ack``/``drop_notice`` cursor so
-    they all decode against the same REST page query.
+    they all decode against the same REST page query. The filter set includes the
+    per-entity CDC filter (R-CDC-7) so a WS cursor and a REST cursor over the same
+    ``(stream, types, entity)`` slice share one fingerprint.
     """
     return filter_fingerprint(
-        stream_id=stream_id, canonical_filter_set=canonical_filter_set(types)
+        stream_id=stream_id,
+        canonical_filter_set=canonical_filter_set(
+            types, entity_type=entity_type, entity_key=entity_key
+        ),
     )
 
 
