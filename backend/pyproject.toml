@@ -148,7 +148,7 @@ asyncio_mode = "auto"
 # (``-m property_nightly``) on the nightly + attended Phase-4 gate lane. The 100k
 # ``property`` profile and ``golden`` replay are fast (~10 s total) and ride the
 # default unit lane — the per-PR permanent gates (testing-strategy §6, §17.3).
-addopts = "--strict-markers -m 'not property_nightly'"
+addopts = "--strict-markers -m 'not property_nightly and not stat_nightly'"
 # Permanent suite markers (testing-strategy §2). --strict-markers requires every
 # marker be declared; the per-PR permanent gates (TEN/GUARD) and the merge-lane
 # OPS suite land here in Phase 2 and grow with later phases.
@@ -159,6 +159,9 @@ markers = [
     "golden: GOLD-A byte-identity replay under the deterministic injected wall clock (§6)",
     "property: PROP-RI referential-integrity property suites — PR-profile 100k (§16)",
     "property_nightly: the 1M nightly/gate property profile — too slow for the PR lane (§16)",
+    "cdc: CDC-1..7 consistency property suite over the full-manifest batch (§ CDC; PR subset rides the unit lane, the full batch is nightly via the larger profile)",
+    "stat: STAT-F/L PR-smoke statistical subset over a 10k-session full-manifest batch (§ STAT)",
+    "stat_nightly: the full STAT-SHAPE/F/L statistical catalog — large batches, nightly + Phase-8 gate only (§ STAT)",
 ]
 
 # --- import-linter contracts (backend-architecture §3.2; CI-blocking) ------------
