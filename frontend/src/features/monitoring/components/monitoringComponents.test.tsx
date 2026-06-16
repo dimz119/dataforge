@@ -47,4 +47,34 @@ describe('TailRow', () => {
     expect(screen.getByText('u')).toBeInTheDocument();
     expect(screen.getByText('#42')).toBeInTheDocument();
   });
+
+  it.each([
+    ['c', 'CDC create', 'text-status-green'],
+    ['u', 'CDC update', 'text-status-amber'],
+    ['d', 'CDC delete', 'text-status-red'],
+    ['r', 'CDC snapshot read', 'text-status-blue'],
+  ])('colors the %s op chip distinctly (Phase 8 CDC op chips)', (op, title, hue) => {
+    render(
+      <TailRow
+        event={{ event_type: `cdc.users`, op, sequence_no: 1, occurred_at: '2026-06-14T10:00:00Z' }}
+        expanded={false}
+        onToggle={() => {}}
+      />,
+    );
+    const chip = screen.getByTestId('cdc-op-chip');
+    expect(chip).toHaveAttribute('data-op', op);
+    expect(chip).toHaveAttribute('title', title);
+    expect(chip.className).toContain(hue);
+  });
+
+  it('omits the op chip for a business event (op null)', () => {
+    render(
+      <TailRow
+        event={{ event_type: 'order_placed', op: null, sequence_no: 7, occurred_at: '2026-06-14T10:00:00Z' }}
+        expanded={false}
+        onToggle={() => {}}
+      />,
+    );
+    expect(screen.queryByTestId('cdc-op-chip')).not.toBeInTheDocument();
+  });
 });

@@ -8,6 +8,11 @@ export { LiveTail, type LiveTailProps } from './components/LiveTail';
 export { PerTypeCounters } from './components/PerTypeCounters';
 export { SamplingBadge } from './components/SamplingBadge';
 export { EventTypeFilter } from './components/EventTypeFilter';
+export {
+  EntityFilter,
+  type EntityFilterProps,
+  type EntityFilterValue,
+} from './components/EntityFilter';
 export { TailRow } from './components/TailRow';
 export { MonitoringOverviewPage } from './pages/MonitoringOverviewPage';
 export { StreamMonitorPage } from './pages/StreamMonitorPage';

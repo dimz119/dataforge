@@ -2114,6 +2114,10 @@ export interface operations {
       query?: {
         /** @description Opaque resume cursor (RC-7). */
         cursor?: string;
+        /** @description Per-entity CDC filter (R-CDC-7); pair with entity_type. */
+        entity_key?: string;
+        /** @description Per-entity CDC filter (R-CDC-7); pair with entity_key. */
+        entity_type?: string;
         /** @description earliest | latest | RFC-3339 start position. */
         from?: string;
         /** @description Page size 1..1000 (default 100). */

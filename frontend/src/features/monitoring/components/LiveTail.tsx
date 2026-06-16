@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Button, EmptyState, JsonViewer } from '../../../shared/ui';
 import { cn } from '../../../shared/lib/cn';
 import { useStreamTail, type WsTransportFactory } from '../../../shared/ws';
+import { EntityFilter, type EntityFilterValue } from './EntityFilter';
 import { EventTypeFilter } from './EventTypeFilter';
 import { SamplingBadge } from './SamplingBadge';
 import { TailRow } from './TailRow';
@@ -44,11 +45,13 @@ export function LiveTail({
   transportFactory,
 }: LiveTailProps) {
   const [selectedTypes, setSelectedTypes] = useState<string[]>([]);
+  const [entityFilter, setEntityFilter] = useState<EntityFilterValue | null>(null);
   const [paused, setPaused] = useState(false);
   const [expanded, setExpanded] = useState<number | null>(null);
 
   const tail = useStreamTail(streamId, {
     eventTypes: selectedTypes.length ? selectedTypes : undefined,
+    entityFilter: entityFilter ?? undefined,
     displayPaused: paused,
     transportFactory,
   });
@@ -98,6 +101,8 @@ export function LiveTail({
         knownTypes={knownTypes ?? []}
         selectedTypes={selectedTypes}
         onTypesChange={setSelectedTypes}
+        entityFilter={entityFilter}
+        onEntityFilterChange={setEntityFilter}
         paused={paused}
         onTogglePause={() => setPaused((p) => !p)}
         onClear={() => {
@@ -175,6 +180,8 @@ interface ToolbarProps {
   knownTypes: string[];
   selectedTypes: string[];
   onTypesChange: (types: string[]) => void;
+  entityFilter: EntityFilterValue | null;
+  onEntityFilterChange: (value: EntityFilterValue | null) => void;
   paused: boolean;
   onTogglePause: () => void;
   onClear: () => void;
@@ -187,6 +194,8 @@ function Toolbar({
   knownTypes,
   selectedTypes,
   onTypesChange,
+  entityFilter,
+  onEntityFilterChange,
   paused,
   onTogglePause,
   onClear,
@@ -204,6 +213,7 @@ function Toolbar({
           onChange={onTypesChange}
         />
       )}
+      <EntityFilter value={entityFilter} onChange={onEntityFilterChange} />
       <div className="ml-auto flex items-center gap-2">
         <SamplingBadge active={sampling.active} keepRatio={sampling.keepRatio} />
         <span className="text-xs tabular-nums text-text-muted" aria-live="polite">

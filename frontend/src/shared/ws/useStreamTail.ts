@@ -19,6 +19,11 @@ import { TailStore, type TailNotice } from './tailStore';
 export interface UseStreamTailOptions {
   /** Server-side filter (auth-frame `types`, WS-5) + defensive client filter. */
   eventTypes?: string[];
+  /**
+   * Per-entity CDC filter (auth-frame `entity_type`/`entity_key`, R-CDC-7). Both or
+   * neither; matched against `entity_refs` with semantics identical to REST.
+   */
+  entityFilter?: { entityType: string; entityKey: string };
   /** Freeze the display buffer; counters keep counting (§7.6). */
   displayPaused?: boolean;
   /** Ring-buffer size (default 1000). */
@@ -54,11 +59,13 @@ export function useStreamTail(
   streamId: string,
   opts: UseStreamTailOptions = {},
 ): UseStreamTailResult {
-  const { eventTypes, displayPaused = false, bufferSize, transportFactory } = opts;
+  const { eventTypes, entityFilter, displayPaused = false, bufferSize, transportFactory } = opts;
   const terminalRef = useRef(false);
 
-  // A stable key so changing the filter recreates the socket+store (WS-5).
+  // A stable key so changing the filter recreates the socket+store (WS-5). The
+  // per-entity CDC filter (R-CDC-7) is part of the filter set, so it joins the key.
   const typesKey = eventTypes?.length ? [...eventTypes].sort().join(',') : '';
+  const entityKey = entityFilter ? `${entityFilter.entityType}:${entityFilter.entityKey}` : '';
 
   const store = useMemo(
     () => new TailStore({ bufferSize, eventTypes }),
@@ -85,6 +92,8 @@ export function useStreamTail(
     const socket = new TailSocket({
       streamId,
       types: eventTypes,
+      entityType: entityFilter?.entityType,
+      entityKey: entityFilter?.entityKey,
       transportFactory,
       getAccessToken: () => tokenManager.getValidAccessToken(),
       refreshToken: () => tokenManager.refresh(),
@@ -112,6 +121,11 @@ export function useStreamTail(
           fromCursor,
           socket.getCursor(),
           gapAborter.signal,
+          {
+            types: eventTypes,
+            entityType: entityFilter?.entityType,
+            entityKey: entityFilter?.entityKey,
+          },
         );
         if (!cancelled) store.ingestGapFill(result.events);
       } catch {
@@ -153,7 +167,7 @@ export function useStreamTail(
       socket.close();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [store, streamId, typesKey]);
+  }, [store, streamId, typesKey, entityKey]);
 
   const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
   const clear = useCallback(() => store.clear(), [store]);

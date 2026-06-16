@@ -96,6 +96,9 @@ export interface TailSocketOptions {
   refreshToken(): Promise<string>;
   /** Server-side event-type filter (auth-frame `types`, WS-5). */
   types?: string[];
+  /** Per-entity CDC filter (auth-frame `entity_type`/`entity_key`, R-CDC-7). */
+  entityType?: string;
+  entityKey?: string;
   /** Server-side uniform sampling (auth-frame `sample_rate`, WS-2). */
   sampleRate?: number;
   handlers: TailSocketHandlers;
@@ -234,6 +237,10 @@ export class TailSocket {
       cursor: this.lastCursor ?? undefined,
       types: this.opts.types?.length ? this.opts.types : undefined,
       sample_rate: this.opts.sampleRate,
+      // R-CDC-7: both or neither — only sent as a pair (the server enforces too).
+      ...(this.opts.entityType && this.opts.entityKey
+        ? { entity_type: this.opts.entityType, entity_key: this.opts.entityKey }
+        : {}),
     };
     transport.send(JSON.stringify(frame));
     // `open` is reported only after the server's `ready` frame (§7.2).

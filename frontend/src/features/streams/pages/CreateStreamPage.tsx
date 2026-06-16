@@ -17,6 +17,7 @@ import {
   useToast,
 } from '../../../shared/ui';
 import { instancesQueryOptions, useCreateStream } from '../api';
+import { VirtualClockSection, type VirtualClockValue } from '../components/VirtualClockSection';
 import { clampTps } from '../tpsScale';
 
 const KNOWN_FIELDS = ['name', 'scenario_instance_id', 'seed', 'target_tps'] as const;
@@ -44,6 +45,12 @@ export function CreateStreamPage() {
   const [name, setName] = useState('');
   const [seed, setSeed] = useState('');
   const [targetTps, setTargetTps] = useState('10');
+  // Phase 8: the virtual-clock controls unlock speed multipliers + backfill mode.
+  const [virtualClock, setVirtualClock] = useState<VirtualClockValue>({
+    speedMultiplier: 1,
+    mode: 'live',
+    backfillDays: 7,
+  });
   const [errors, setErrors] = useState<{
     name?: string;
     scenario_instance_id?: string;
@@ -99,8 +106,12 @@ export function CreateStreamPage() {
         // Blank seed → server-generated (INV-STR-5); omit the key when empty.
         ...(seed.trim() !== '' ? { seed: seed.trim() } : {}),
         target_tps: tps,
-        // Phase 8: virtual_clock unlocks speed_multiplier ≠ 1 + backfill mode.
-        // v1 is live-only; the server defaults speed_multiplier to 1.0.
+        // Phase 8: virtual_clock carries the unlocked speed_multiplier (decimal
+        // string per the API contract). Backfill mode is realized via the datasets
+        // resource (§4.10), not a stream-create field, so it is not sent here.
+        ...(virtualClock.speedMultiplier !== 1
+          ? { virtual_clock: { speed_multiplier: String(virtualClock.speedMultiplier) } }
+          : {}),
       },
       {
         onSuccess: (stream) => {
@@ -196,35 +207,10 @@ export function CreateStreamPage() {
           )}
         </FormField>
 
-        <fieldset className="rounded-md border border-border p-4">
-          <legend className="px-1 text-sm font-medium text-text">Virtual clock</legend>
-          <div className="grid grid-cols-2 gap-4">
-            <FormField label="Speed" hint="Phase 8 unlocks faster-than-live.">
-              {(p) => (
-                <select
-                  id={p.id}
-                  value="1"
-                  disabled
-                  className="h-10 w-full rounded-md border border-border bg-surface-muted px-3 text-sm text-text-muted"
-                >
-                  <option value="1">1× (live)</option>
-                </select>
-              )}
-            </FormField>
-            <FormField label="Mode" hint="Backfill is the datasets resource (Phase 8).">
-              {(p) => (
-                <select
-                  id={p.id}
-                  value="live"
-                  disabled
-                  className="h-10 w-full rounded-md border border-border bg-surface-muted px-3 text-sm text-text-muted"
-                >
-                  <option value="live">Live</option>
-                </select>
-              )}
-            </FormField>
-          </div>
-        </fieldset>
+        <VirtualClockSection
+          value={virtualClock}
+          onChange={setVirtualClock}
+        />
 
         <div className="flex justify-end gap-2">
           <Button type="button" variant="secondary" onClick={() => void navigate(-1)}>
