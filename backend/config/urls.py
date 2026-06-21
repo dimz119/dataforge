@@ -8,6 +8,7 @@ keys, and audit-read mount alongside).
 from django.urls import include, path
 
 from catalog.api.urls import urlpatterns as catalog_urlpatterns
+from chaos.api.urls import urlpatterns as chaos_urlpatterns
 from delivery.api.urls import urlpatterns as delivery_urlpatterns
 from generation.api.urls import urlpatterns as generation_urlpatterns
 from identity.api.urls import urlpatterns as identity_urlpatterns
@@ -25,6 +26,7 @@ api_v1_patterns = [
     *generation_urlpatterns,
     *streams_urlpatterns,
     *delivery_urlpatterns,
+    *chaos_urlpatterns,
 ]
 
 urlpatterns = [

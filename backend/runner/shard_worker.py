@@ -54,7 +54,7 @@ import asyncio
 import hashlib
 import json
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import structlog
 
@@ -87,7 +87,7 @@ __all__ = ["ShardWorker"]
 TICK_MS = 1000
 GENERATE_BUDGET_MAX = 500  # paced budget cap per tick (§8.3 step 4)
 CHECKPOINT_INTERVAL_S = 30.0  # §8.4 periodic cadence
-LATE_BUFFER_TAKE_LIMIT = 500  # Phase 9 pass-through (no due re-emissions yet)
+LATE_BUFFER_TAKE_LIMIT = 500  # §6.2 scheduler page (paced re-emission)
 
 
 def _deterministic_emitted_at(batch: list[Any]) -> list[Any]:
@@ -155,6 +155,13 @@ class ShardWorker:
         self._shard_count: int = 1
         self._checkpoint_seq: int = 0
         self._last_checkpoint_at: float = 0.0
+        # Phase 9 chaos: the pipeline + the two append-only ports (recorder /
+        # late_buffer). Built in _setup once the workspace + speed are known.
+        self._chaos: Any | None = None  # ChaosPipeline
+        self._recorder: Any | None = None  # chaos InjectionRecorder
+        self._late_buffer: Any | None = None  # chaos LateArrivalBuffer
+        self._chaos_subseed: bytes = b""  # HMAC(stream_seed, "chaos") (§4.1)
+        self._speed_multiplier: float = 1.0
         # Pause/resume bookkeeping (T6/T8). ``_paused`` is the warm-hold flag: while
         # set, the worker idles (lease retained, emission halted, clock frozen). It is
         # entered once per pause (synchronous checkpoint on entry) and cleared on the
@@ -229,6 +236,8 @@ class ShardWorker:
             rate_per_second=desired.target_tps / self._shard_count,
             now=self._wall.now(),
         )
+        self._speed_multiplier = float(desired.speed_multiplier)
+        self._build_chaos(desired)
         restored = await self._checkpoints.load()
         if restored is not None:
             # §8.5 takeover: rehydrate pools/RNG/clock and resume the sequence.
@@ -270,6 +279,51 @@ class ShardWorker:
         from generation.infra.ledger_sink import LedgerSink
 
         return LedgerSink(workspace_id=str(desired.workspace_id))
+
+    def _build_chaos(self, desired: DesiredState) -> None:
+        """Build the chaos pipeline + the recorder / durable-buffer ports (§6).
+
+        The pipeline is pure (it never touches Django); the recorder
+        (``chaos_injections``) and the late buffer (``late_arrival_buffer``) are the
+        two Postgres-backed ports. The buffer is DURABLE state — a fresh instance
+        under a new lease holder picks up pending entries via ``take_due`` on its
+        first tick (§6.3 failover), which is why no in-memory hand-off is needed.
+        """
+        from chaos.application.services import resolve_policy
+        from chaos.infra.late_buffer import LateArrivalBuffer
+        from chaos.infra.recorder import InjectionRecorder
+        from dataforge_engine.chaos import ChaosPipeline, chaos_subseed
+
+        self._chaos = ChaosPipeline(resolve_policy(desired.chaos_config))
+        self._chaos_subseed = chaos_subseed(int(desired.seed))
+        self._recorder = InjectionRecorder()
+        self._late_buffer = LateArrivalBuffer(
+            workspace_id=str(desired.workspace_id),
+            stream_id=self._stream_id,
+            shard_id=self._shard_id,
+            publish=self._publisher.publish,
+            speed_multiplier=self._speed_multiplier,
+        )
+        self._chaos_config_sha = _config_sha256(desired.chaos_config or {})
+
+    def _apply_chaos_config(self, desired: DesiredState) -> None:
+        """Rebuild the pipeline if the live ``chaos_config`` changed (§3.5).
+
+        Toggles/rates/params apply at the next tick boundary. The recorder and the
+        durable buffer are unaffected — disabling a mode never un-records truth nor
+        drops pending entries (§3.5 mid-flight rules). Disabling ``late_arriving``
+        stops new selections only; pending entries still emit at ``due_at``.
+        """
+        if self._chaos is None:
+            return
+        from chaos.application.services import resolve_policy
+        from dataforge_engine.chaos import ChaosPipeline
+
+        sha = _config_sha256(desired.chaos_config or {})
+        if sha == self._chaos_config_sha:
+            return
+        self._chaos = ChaosPipeline(resolve_policy(desired.chaos_config))
+        self._chaos_config_sha = sha
 
     # -- the tick ----------------------------------------------------------------
 
@@ -317,12 +371,14 @@ class ShardWorker:
         rate = desired.target_tps / self._shard_count
         self._bucket.set_rate(rate)
         self._shard.set_target_tps(float(desired.target_tps))
-        # chaos.configure(desired.chaos) is a Phase 9 no-op (identity slot).  # Phase 9
+        # Live chaos config: rebuild the pipeline from the polled desired-state
+        # document so toggles/rates apply at the next tick boundary (§3.5, ≤ 2 s).
+        self._apply_chaos_config(desired)
 
         # 4. generate (paced).
         out = await self._generate_tick()
 
-        # 5-7. ledger BEFORE chaos, chaos identity pass-through, publish.
+        # 5-7. ledger BEFORE chaos, chaos transform + late buffer, publish.
         published = await self._emit(out)
 
         # 8. stats.incr (Redis counters, INV-OBS-2).
@@ -353,25 +409,87 @@ class ShardWorker:
         return _deterministic_emitted_at(batch)
 
     async def _emit(self, batch: list[Any]) -> int:
-        """Steps 5-7: ledger append (BEFORE chaos), chaos identity, publish.
+        """Steps 5-7: ledger append (BEFORE chaos), chaos transform, publish + due.
 
-        INV-GEN-5: the ledger sees the clean batch before any downstream stage. In
-        Phase 5 chaos is an identity pass-through and injections/late_buffer are
-        no-ops — the SEAMS exist so Phase 9 inserts a transform, not a topology
-        change.  # Phase 9
+        INV-GEN-5: the ledger sees the clean batch before any downstream stage.
+        Then the chaos pipeline transforms delivery truth (§2.2): records each
+        injection BEFORE the affected instance is published/extracted (INV-CHA-4),
+        extracts ``late_arriving`` selections into the durable buffer, and the
+        scheduler re-emits any entries now due (§6.2). The due poll runs every
+        running tick — even on a quiet tick — so a post-resume overdue backlog
+        drains promptly (§6.3 resume row).
         """
         assert self._shard is not None and self._ledger is not None
-        if not batch:
+        published = 0
+        if batch:
+            # 5. durable BEFORE chaos reads it (INV-GEN-5).
+            await asyncio.to_thread(self._append_ledger, batch)
+            # 6. chaos.transform — content + temporal stages; late selections leave
+            #    the in-line flow into the durable buffer (recorded first, INV-CHA-4).
+            out = await asyncio.to_thread(self._run_chaos, batch)
+            # 7. publish the surviving/added in-line instances, keyed by partition_key.
+            published += self._publisher.publish(out)
+        # 5b. the late-arrival scheduler: publish entries now due (§6.2). Re-emissions
+        #     go through the publisher inside take_due; count them into the total.
+        published += await self._take_due_late()
+        return published
+
+    def _run_chaos(self, batch: list[Any]) -> list[Any]:
+        """Run the pure pipeline, then persist its side effects (recorder + buffer).
+
+        Records flush BEFORE the late entries persist and BEFORE publish (INV-CHA-4);
+        the late buffer's ``schedule`` then durably stores the tick's selections. All
+        on the worker thread so the RLS GUC lives on the ORM's connection.
+        """
+        if self._chaos is None:  # unit-test fallback (no _setup): identity.
+            return batch
+        assert self._recorder is not None and self._late_buffer is not None
+        ctx = self._chaos_context()
+        with self._armed_scope():
+            out: list[Any] = self._chaos.transform(batch, ctx)
+            self._recorder.flush()  # answer-key rows BEFORE publish/extraction
+            self._late_buffer.schedule()  # durable pending entries (INV-CHA-5)
+        return out
+
+    async def _take_due_late(self) -> int:
+        """Step 5b: re-emit due late-buffer entries this tick (§6.2 scheduler)."""
+        if self._late_buffer is None:
             return 0
-        # 5. durable BEFORE chaos reads it (INV-GEN-5).
-        await asyncio.to_thread(self._append_ledger, batch)
-        # 6. chaos.transform — IDENTITY PASS-THROUGH (Phase 9 inserts the transform).
-        out = batch  # chaos.transform(batch) → (out, injections, late)  # Phase 9
-        # injections.record(injections) / late_buffer.schedule(late)  # Phase 9
-        # out += late_buffer.take_due(now, limit=LATE_BUFFER_TAKE_LIMIT)  # Phase 9
-        # 7. publish the post-chaos batch, keyed by partition_key (bounded ≤1 batch
-        #    in-flight after a lease loss, §8.2 Kafka row).
-        return self._publisher.publish(out)
+        return await asyncio.to_thread(self._drain_due)
+
+    def _drain_due(self) -> int:
+        assert self._late_buffer is not None
+        with self._armed_scope():
+            return int(
+                self._late_buffer.take_due(self._wall.now(), limit=LATE_BUFFER_TAKE_LIMIT)
+            )
+
+    def _chaos_context(self) -> Any:
+        """A per-tick :class:`StageContext` bound to the recorder + buffer ports."""
+        from dataforge_engine.chaos import StageContext
+
+        assert self._shard is not None
+        clock = type("Clk", (), {"speed_multiplier": self._speed_multiplier})()
+        return StageContext(
+            stream_id=self._stream_id,
+            shard_id=self._shard_id,
+            workspace_id=self._workspace_id,
+            chaos_subseed=self._chaos_subseed,
+            recorder=cast(Any, self._recorder),
+            late_buffer=cast(Any, self._late_buffer),
+            virtual_clock=clock,
+        )
+
+    def _armed_scope(self) -> Any:
+        """Workspace-armed transaction scope for the chaos Postgres writes (§4.2)."""
+        import contextlib
+        import uuid as _uuid
+
+        from tenancy.application.services import worker_workspace_scope
+
+        if not self._workspace_id:
+            return contextlib.nullcontext()
+        return worker_workspace_scope(_uuid.UUID(self._workspace_id))
 
     def _append_ledger(self, batch: list[Any]) -> None:
         """Workspace-armed ledger append (the §4.2 RLS arming for the data plane).
@@ -416,16 +534,20 @@ class ShardWorker:
     # -- reconcile branches ------------------------------------------------------
 
     async def _finalize(self) -> None:
-        """T10 stop finalize: checkpoint (retained for T12), then release the lease.
+        """T10 stop finalize: apply OnStopPolicy, checkpoint, then release the lease.
 
-        The checkpoint is retained for restart-as-continuation (T12; the seed is
-        never re-rolled, INV-STR-5). On-stop late-buffer flush is a Phase 9 slot.
-        Then the runner-converged lifecycle is written ``stopped`` and the lease is
-        released so the shard is no longer claimable.  # Phase 9 (late-buffer flush)
+        On-stop the stream's ``on_stop_policy`` (§6.3) governs pending late
+        re-emissions — ``discard`` (default) marks them ``discarded``; ``flush``
+        publishes every pending entry now (ignoring ``due_at``) before the lease is
+        released, marking them ``emitted`` with injection ``outcome: flushed``. The
+        checkpoint is retained for restart-as-continuation (T12; the seed is never
+        re-rolled, INV-STR-5). Then the runner-converged lifecycle is written
+        ``stopped`` and the lease released so the shard is no longer claimable.
         """
         from streams.domain.models import REASON_USER
 
         assert self._checkpoints is not None and self._shard is not None
+        await self._apply_on_stop_policy()
         try:
             await self._checkpoint()
         except FencingError:
@@ -445,6 +567,34 @@ class ShardWorker:
             shard_id=self._shard_id,
             emitted_total=self.emitted_total,
         )
+
+    async def _apply_on_stop_policy(self) -> None:
+        """Resolve + apply the stream's ``on_stop_policy`` to pending late entries (§6.3).
+
+        Re-reads the desired-state document so the policy value in effect at the
+        moment the stop is processed applies (§3.2). ``flush`` re-emissions count
+        into ``emitted_total``; ``discard`` (default) records ``outcome: discarded``.
+        """
+        if self._late_buffer is None:
+            return
+        from chaos.application.services import resolve_on_stop_policy
+
+        desired = await asyncio.to_thread(desired_state.desired_for, self._stream_id)
+        config = desired.chaos_config if desired is not None else None
+        policy = resolve_on_stop_policy(config)
+        published = await asyncio.to_thread(self._run_on_stop, policy)
+        if published:
+            await lifecycle.incr_emitted(self._redis, self._stream_id, published)
+            self.emitted_total += published
+
+    def _run_on_stop(self, policy: str) -> int:
+        assert self._late_buffer is not None
+        now = self._wall.now()
+        with self._armed_scope():
+            if policy == "flush":
+                return int(self._late_buffer.flush_pending(now))
+            self._late_buffer.discard_pending(now)
+            return 0
 
     async def _enter_paused(self) -> None:
         """T5→T6 pause: halt within one tick, checkpoint synchronously, hold the lease.
