@@ -59,11 +59,23 @@ def worker_workspace_scope(workspace_id: uuid.UUID | None) -> Iterator[None]:
             yield
         return
     with transaction.atomic(), workspace_context(workspace_id):
+        # Save the prior GUC and RESTORE it on exit (not blindly clear to ''):
+        # ``SET LOCAL`` is transaction-scoped, not savepoint-scoped, so a nested
+        # scope that cleared on exit would wipe the GUC for the *enclosing*
+        # transaction too — hiding every subsequent armed read/write under the
+        # NOBYPASSRLS runtime role. Restoring the previous value makes this scope
+        # nesting-safe, the Layer-2 GUC twin of Layer-1's contextvar reset(token)
+        # (tenancy.domain.context.workspace_context — "exit restores the previous
+        # value, not unconditionally None"). The runner arms an outer scope per
+        # tick and the per-write seams (recorder/buffer/ledger/checkpoint) re-arm
+        # the same workspace inside it; without restore the second seam blinds the
+        # third.
+        prior = guc.get_workspace_guc()
         guc.set_workspace_guc(workspace_id)
         try:
             yield
         finally:
-            guc.set_workspace_guc(None)
+            guc.restore_workspace_guc(prior)
 
 
 @contextmanager
@@ -85,11 +97,16 @@ def platform_read_scope() -> Iterator[None]:
     workspace and can never cross tenants.
     """
     with transaction.atomic():
+        # Save + restore the prior value (not blindly clear) so a platform read
+        # nested inside an enclosing scope leaves that scope's context intact on
+        # exit — ``SET LOCAL`` is transaction-scoped, so clearing would otherwise
+        # disarm the enclosing transaction (mirrors worker_workspace_scope).
+        prior = guc.get_platform_guc()
         guc.set_platform_guc(True)
         try:
             yield
         finally:
-            guc.set_platform_guc(False)
+            guc.restore_platform_guc(prior)
 
 
 def _arm_user_for_membership_read(user: User) -> None:
