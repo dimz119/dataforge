@@ -3,11 +3,14 @@ import type { StreamResponse } from '../../../shared/api/types';
 import { controlRow } from '../controlMatrix';
 import { LifecycleButtons } from './LifecycleButtons';
 import { PinSummary } from './PinSummary';
+import { SchemaPanel } from './SchemaPanel';
 import { StreamDangerZone } from './StreamDangerZone';
 import { TpsSlider } from './TpsSlider';
 
 export interface StreamControlPanelProps {
   workspaceId: string;
+  /** Active workspace slug, for the schema-panel registry links. */
+  slug: string;
   stream: StreamResponse;
   /** Per-stream plan cap for the TPS slider (PRD §7). Defaults to the contract max. */
   tpsCap?: number;
@@ -20,7 +23,7 @@ export interface StreamControlPanelProps {
  * `chaos` and `answer-key` tabs are Phase 9 — the tab bar (rendered by the page) is
  * control-only now.
  */
-export function StreamControlPanel({ workspaceId, stream, tpsCap }: StreamControlPanelProps) {
+export function StreamControlPanel({ workspaceId, slug, stream, tpsCap }: StreamControlPanelProps) {
   const row = controlRow(stream.status);
 
   return (
@@ -53,6 +56,7 @@ export function StreamControlPanel({ workspaceId, stream, tpsCap }: StreamContro
       </section>
 
       <PinSummary stream={stream} />
+      <SchemaPanel workspaceId={workspaceId} slug={slug} stream={stream} />
       <StreamDangerZone status={stream.status} />
     </div>
   );

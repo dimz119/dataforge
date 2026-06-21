@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://docs.dataforge.dev/schemas/ecommerce.order_placed/versions/2.json",
+  "title": "ecommerce.order_placed v2",
+  "description": "Adds optional shipping_state (REQ-RULE: required set unchanged). Registered explicitly in Phase 10.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "order_id",
+    "user_id",
+    "items",
+    "currency",
+    "subtotal",
+    "shipping_fee",
+    "total",
+    "shipping_country"
+  ],
+  "properties": {
+    "order_id": { "type": "string", "pattern": "^ord_[0-9a-f]{16}$" },
+    "user_id": { "type": "string", "pattern": "^usr_[0-9a-f]{16}$" },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["product_id", "quantity", "unit_price"],
+        "properties": {
+          "product_id": { "type": "string", "pattern": "^prd_[0-9a-f]{16}$" },
+          "quantity": { "const": 1 },
+          "unit_price": { "type": "string", "pattern": "^-?\\d+\\.\\d{1,4}$" }
+        }
+      }
+    },
+    "currency": { "const": "USD" },
+    "subtotal": { "type": "string", "pattern": "^-?\\d+\\.\\d{1,4}$" },
+    "shipping_fee": { "type": "string", "pattern": "^-?\\d+\\.\\d{1,4}$" },
+    "total": { "type": "string", "pattern": "^-?\\d+\\.\\d{1,4}$" },
+    "shipping_country": { "type": "string" },
+    "shipping_state": {
+      "type": "string",
+      "x-df-binding": { "from": "actor.address.state" }
+    }
+  }
+}

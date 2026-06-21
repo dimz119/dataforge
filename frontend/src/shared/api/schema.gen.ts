@@ -366,6 +366,33 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/api/v1/schemas/{subject}/diff': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * @description GET /schemas/{subject}/diff?from=a&to=b (api-spec §4.12 #66).
+     *
+     *     The computed added-fields diff between two registered versions (§5.3): ``added``
+     *     is ``properties(to) \ properties(from)`` recursively (incl. fields added inside
+     *     an existing nested object), each ``{path, type, required:false}``. Under
+     *     ``BACKWARD_ADDITIVE`` ``removed``/``changed`` are empty by construction
+     *     (INV-REG-3); they exist in the shape for V-2. ``404`` if either version is
+     *     absent; ``400`` ``validation-error`` if ``from ≥ to`` (a diff is forward-only).
+     *     The diff is computed, never stored (§3.2). Auth is ``schemas:read`` (A-4).
+     */
+    get: operations['schemas_diff_retrieve'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/api/v1/schemas/{subject}/versions': {
     parameters: {
       query?: never;
@@ -607,6 +634,91 @@ export interface paths {
      *     (INV-TEN-5) → else 403 quota-exceeded (T7).
      */
     post: operations['streams_resume'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/streams/{stream_id}/schema-upgrades': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * @description POST | GET /streams/{stream_id}/schema-upgrades (api-spec §4.8.4 #50-51).
+     *
+     *     POST schedules a mid-stream additive evolution (REG-U001..U007 validation →
+     *     409 ``conflict`` with the ``errors[]`` extension on failure); ``streams:write``.
+     *     Idempotency-Key (I-1): a repeat with the same key returns the already-scheduled
+     *     entry (still 201, no duplicate). GET lists every entry
+     *     (``scheduled``/``applied``/``cancelled``, the cancelled retained); ``streams:read``.
+     */
+    get: operations['streams_schema_upgrades_list'];
+    put?: never;
+    /**
+     * @description POST | GET /streams/{stream_id}/schema-upgrades (api-spec §4.8.4 #50-51).
+     *
+     *     POST schedules a mid-stream additive evolution (REG-U001..U007 validation →
+     *     409 ``conflict`` with the ``errors[]`` extension on failure); ``streams:write``.
+     *     Idempotency-Key (I-1): a repeat with the same key returns the already-scheduled
+     *     entry (still 201, no duplicate). GET lists every entry
+     *     (``scheduled``/``applied``/``cancelled``, the cancelled retained); ``streams:read``.
+     */
+    post: operations['streams_schema_upgrades_create'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/streams/{stream_id}/schema-upgrades/{upgrade_id}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post?: never;
+    /**
+     * @description DELETE /streams/{stream_id}/schema-upgrades/{upgrade_id} (api-spec §4.8.4 #52).
+     *
+     *     Cancels a ``scheduled`` entry (→ 204); a non-``scheduled`` entry → 409
+     *     ``invalid-state-transition``; an unknown id → 404. The cancelled entry is retained
+     *     in the list (irreversible history is the audit posture, §10.3). ``streams:write``.
+     */
+    delete: operations['streams_schema_upgrades_cancel'];
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/streams/{stream_id}/schema-versions': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * @description GET /streams/{stream_id}/schema-versions (schema-registry §10.2; #?).
+     *
+     *     The per-stream effective schema-version projection ``{effective, pending,
+     *     applied}``: ``effective`` the §10.2 ``max(materialized pin, highest applied
+     *     upgrade target)`` map per subject (the materialized pin lives in the checkpoint
+     *     after first start; a preview from the pinned manifest before it); ``pending`` the
+     *     ``scheduled`` upgrade entries awaiting their simulated-time cutover; ``applied``
+     *     the applied entries (with ``applied_at_wall``/``applied_sequence_no``). Cancelled
+     *     entries are surfaced only on the upgrade-list endpoint. ``streams:read``; a
+     *     foreign-workspace credential masks to 404 (W-1/W-3) via the shared resolver.
+     */
+    get: operations['streams_schema_versions'];
+    put?: never;
+    post?: never;
     delete?: never;
     options?: never;
     head?: never;
@@ -921,6 +1033,12 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
   schemas: {
+    /** @description One added property in the computed diff (#66). */
+    AddedField: {
+      path: string;
+      type: string;
+      required: boolean;
+    };
     /**
      * @description One flattened InjectionRecord on the wire (api-spec §4.13 / event-model §7.3).
      *
@@ -1298,6 +1416,72 @@ export interface components {
       created_at: string;
     };
     /**
+     * @description The computed version-to-version diff (#66).
+     *
+     *     Under ``BACKWARD_ADDITIVE`` (the only MVP mode) ``removed_fields`` /
+     *     ``changed_fields`` are always empty by construction (INV-REG-3); they are in the
+     *     shape so the contract survives a future compatibility-mode addition (V-2).
+     */
+    SchemaDiff: {
+      subject: string;
+      from_version: number;
+      to_version: number;
+      added_fields: components['schemas']['AddedField'][];
+      removed_fields: components['schemas']['AddedField'][];
+      changed_fields: components['schemas']['AddedField'][];
+    };
+    SchemaSubjectPage: {
+      data: components['schemas']['SubjectSummary'][];
+      next_cursor: string | null;
+    };
+    /**
+     * @description ``POST /streams/{id}/schema-upgrades`` body (api-spec §4.8.4 / schema-registry §10.3).
+     *
+     *     ``subject`` is the dotted subject name; ``target_version`` the registered version
+     *     to evolve to (≥ 1). ``at`` is the SIMULATED-time cutover instant (``occurred_at``
+     *     domain) — optional; omitted means "the next tick boundary" (effectively
+     *     immediately). The REG-U001..U007 semantic checks run in the service against the
+     *     stream's pinned manifest + virtual clock (this serializer only shapes the wire).
+     */
+    SchemaUpgradeCreate: {
+      subject: string;
+      target_version: number;
+      /** Format: date-time */
+      at?: string | null;
+    };
+    /**
+     * @description The schema-upgrade resource on the wire (api-spec §4.8.4 #50-52).
+     *
+     *     The ``scheduled`` 201 carries ``upgrade_id``/``status``/``created_at``; ``applied``
+     *     entries additionally carry ``applied_at_wall`` and the per-shard
+     *     ``applied_sequence_no`` written by the runner cutover (§10.4); ``cancelled`` entries
+     *     carry ``cancelled_at``. ``at`` is the simulated-time cutover instant (null ⇒ next
+     *     tick). The output is assembled from the persisted jsonb entry (the runner and the
+     *     cancel path complete the optional members in place).
+     */
+    SchemaUpgradeResponse: {
+      /** Format: uuid */
+      upgrade_id: string;
+      /** Format: uuid */
+      stream_id: string;
+      subject: string;
+      target_version: number;
+      /** Format: date-time */
+      at: string | null;
+      status: components['schemas']['StatusEnum'];
+      /** Format: date-time */
+      created_at: string;
+      /** Format: date-time */
+      applied_at_wall?: string | null;
+      applied_sequence_no?: number | null;
+      /** Format: date-time */
+      cancelled_at?: string | null;
+    };
+    SchemaVersionPage: {
+      data: components['schemas']['VersionProvenance'][];
+      next_cursor: string | null;
+    };
+    /**
      * @description * `events:read` - events:read
      *     * `streams:read` - streams:read
      *     * `streams:write` - streams:write
@@ -1327,6 +1511,13 @@ export interface components {
       created_at: string;
     };
     /**
+     * @description * `scheduled` - scheduled
+     *     * `applied` - applied
+     *     * `cancelled` - cancelled
+     * @enum {string}
+     */
+    StatusEnum: 'scheduled' | 'applied' | 'cancelled';
+    /**
      * @description ``POST /streams`` body (api-spec §4.8).
      *
      *     ``seed`` is optional (server-generated when omitted) and accepted as a string or
@@ -1346,6 +1537,9 @@ export interface components {
       target_tps: number;
       chaos?: {
         [key: string]: unknown;
+      };
+      schema_version_pins?: {
+        [key: string]: number;
       };
       virtual_clock?: components['schemas']['VirtualClockInput'];
     };
@@ -1377,6 +1571,9 @@ export interface components {
       status_reason: string;
       desired_state: components['schemas']['_DesiredState'];
       virtual_clock: components['schemas']['_VirtualClock'];
+      schema_versions: {
+        [key: string]: number;
+      };
       shard_count: number;
       /** Format: date-time */
       created_at: string;
@@ -1384,6 +1581,27 @@ export interface components {
       started_at: string | null;
       /** Format: date-time */
       last_transition_at: string | null;
+    };
+    StreamSchemaUpgradePage: {
+      data: components['schemas']['SchemaUpgradeResponse'][];
+      next_cursor: string | null;
+    };
+    /**
+     * @description ``GET /streams/{id}/schema-versions`` → ``{effective, pending, applied}`` (§10.2).
+     *
+     *     ``effective`` is the per-subject effective-version map
+     *     (``effective = max(materialized pin, highest applied upgrade target)``); ``{}``
+     *     before first start. ``pending`` is the ``scheduled`` upgrade entries (awaiting
+     *     their simulated-time cutover); ``applied`` the ``applied`` entries (each carrying
+     *     ``applied_at_wall`` + ``applied_sequence_no``). Cancelled entries are history,
+     *     surfaced only on the upgrade-list endpoint, not here.
+     */
+    StreamSchemaVersionsResponse: {
+      effective: {
+        [key: string]: number;
+      };
+      pending: components['schemas']['SchemaUpgradeResponse'][];
+      applied: components['schemas']['SchemaUpgradeResponse'][];
     };
     /**
      * @description The ``GET /streams/{id}/stats`` response (api-spec §4.11.1, Phase 6).
@@ -2073,7 +2291,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['SubjectSummary'][];
+          'application/json': components['schemas']['SchemaSubjectPage'];
         };
       };
     };
@@ -2099,6 +2317,30 @@ export interface operations {
       };
     };
   };
+  schemas_diff_retrieve: {
+    parameters: {
+      query: {
+        from: number;
+        to: number;
+      };
+      header?: never;
+      path: {
+        subject: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['SchemaDiff'];
+        };
+      };
+    };
+  };
   schemas_versions_list: {
     parameters: {
       query?: never;
@@ -2115,7 +2357,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['VersionProvenance'][];
+          'application/json': components['schemas']['SchemaVersionPage'];
         };
       };
     };
@@ -2448,6 +2690,96 @@ export interface operations {
         };
         content: {
           'application/json': components['schemas']['StreamResponse'];
+        };
+      };
+    };
+  };
+  streams_schema_upgrades_list: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        stream_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['StreamSchemaUpgradePage'];
+        };
+      };
+    };
+  };
+  streams_schema_upgrades_create: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        stream_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['SchemaUpgradeCreate'];
+        'application/x-www-form-urlencoded': components['schemas']['SchemaUpgradeCreate'];
+        'multipart/form-data': components['schemas']['SchemaUpgradeCreate'];
+      };
+    };
+    responses: {
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['SchemaUpgradeResponse'];
+        };
+      };
+    };
+  };
+  streams_schema_upgrades_cancel: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        stream_id: string;
+        upgrade_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description No response body */
+      204: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+    };
+  };
+  streams_schema_versions: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        stream_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['StreamSchemaVersionsResponse'];
         };
       };
     };
@@ -3058,3 +3390,6 @@ export const roleEnumValues: ReadonlyArray<
 export const scopesEnumValues: ReadonlyArray<
   FlattenedDeepRequired<components>['schemas']['ScopesEnum']
 > = ['events:read', 'streams:read', 'streams:write', 'schemas:read', 'answer_key:read'];
+export const statusEnumValues: ReadonlyArray<
+  FlattenedDeepRequired<components>['schemas']['StatusEnum']
+> = ['scheduled', 'applied', 'cancelled'];

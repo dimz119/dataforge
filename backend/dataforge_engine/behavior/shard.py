@@ -191,6 +191,36 @@ class Shard:
         """
         self._config.target_tps = float(target_tps)
 
+    def retarget_ir(self, ir: ManifestIR) -> None:
+        """Adopt a schema-upgrade-extended IR mid-stream (schema-registry §10.4).
+
+        The runner recompiles the IR with the cutover's ``schema_versions`` /
+        ``schema_cutovers`` (the pre-warmed added-field bindings) and hands it in when a
+        scheduled upgrade arms. ONLY the schema-evolution overlay may differ: the
+        manifest *body* (slug, version, entities, machines, seeding, relationships) is
+        identical — an upgrade bumps ``schema_ref.version`` and appends optional payload
+        fields, never the behavioral pin (INV-STR-5; §10.4 ``manifest_version``
+        unchanged). The live pools, heap, sequence counter, virtual clock, seed tree,
+        and arrival integrator are shared by reference and stay untouched, so generation
+        continues with zero ``sequence_no`` gaps — exactly the "no restart" cutover. The
+        same IR reference is threaded to the interpreter and the background-mutation
+        driver so every emit path stamps the new version + fields from the next event on.
+
+        The per-event ``occurred_at`` gate inside a :class:`SchemaCutover` is what makes
+        the switch atomic between events (the first event whose ``occurred_at ≥ at``
+        carries the new version), so the runner may safely retarget on any tick once the
+        cutover is pre-warmed — events before ``at`` still stamp the old version even
+        with the extended IR installed.
+        """
+        if ir.slug != self._ir.slug or ir.version != self._ir.version:
+            raise ValueError(
+                "retarget_ir requires the same manifest body "
+                f"(have {self._ir.slug}:{self._ir.version}, got {ir.slug}:{ir.version})"
+            )
+        self._ir = ir
+        self._interp.set_ir(ir)
+        self._bg.set_ir(ir)
+
     def reopen_clock_segment(self, wall_now: datetime) -> None:
         """Re-anchor the virtual clock at ``(wall_now, frontier_us)`` (resume, §9.3 step 4).
 

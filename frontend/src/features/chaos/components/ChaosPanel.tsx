@@ -12,7 +12,9 @@ import {
   type ChaosModeConfig,
   type ChaosPolicyDocument,
 } from '../types';
+import type { DriftSubjectMenu } from '../api';
 import { ChaosModeCard } from './ChaosModeCard';
+import { DriftModeNote } from './DriftModeNote';
 import { OnStopPolicySelect } from './OnStopPolicySelect';
 import { PresetPicker } from './PresetPicker';
 
@@ -21,6 +23,8 @@ export interface ChaosPanelProps {
   streamId: string;
   /** True when the pinned manifest has a registered next schema version (INV-REG-5). */
   hasNextSchemaVersion?: boolean;
+  /** The per-subject schema-drift menu (Phase 10, DR-1) for the DriftModeNote. */
+  driftMenu?: DriftSubjectMenu[];
 }
 
 /** Normalize the loosely-typed `modes` map into the closed seven-mode document. */
@@ -58,7 +62,12 @@ function modeErrors(err: unknown): Partial<Record<ChaosMode, string>> {
  * Edits PATCH optimistically (§4.3) and re-validate (CH-V*); 422s surface on the
  * offending card. `schema_drift` is disabled until a next schema version exists.
  */
-export function ChaosPanel({ workspaceId, streamId, hasNextSchemaVersion = false }: ChaosPanelProps) {
+export function ChaosPanel({
+  workspaceId,
+  streamId,
+  hasNextSchemaVersion = false,
+  driftMenu,
+}: ChaosPanelProps) {
   const toast = useToast();
   const query = useQuery(chaosQueryOptions(workspaceId, streamId));
   const update = useUpdateChaos(workspaceId, streamId);
@@ -124,6 +133,10 @@ export function ChaosPanel({ workspaceId, streamId, hasNextSchemaVersion = false
           );
         })}
       </div>
+
+      {driftMenu && driftMenu.length > 0 && (
+        <DriftModeNote menu={driftMenu} eligible={hasNextSchemaVersion} />
+      )}
 
       <p className="text-xs text-text-muted" aria-live="polite">
         {update.isPending ? 'Saving…' : 'Changes apply within 2 s (PIN-3).'}

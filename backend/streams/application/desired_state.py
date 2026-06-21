@@ -27,10 +27,10 @@ INV-STR-6).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from streams.domain.models import (
@@ -43,6 +43,9 @@ from streams.domain.models import (
     RUN_STOPPED,
     Stream,
 )
+
+if TYPE_CHECKING:
+    from registry.application.drift_menu import DriftMenuEntry
 
 __all__ = ["DesiredState", "claimable_desired_states", "desired_for"]
 
@@ -73,6 +76,13 @@ class DesiredState:
     run_state: str
     target_tps: int
     chaos_config: dict[str, Any]
+    # Per-stream schema state the runner cutover reconciles (schema-registry §10.4).
+    # ``schema_version_pins`` is the {subject: version} pin map (empty ⇒ latest, the
+    # PIN-R1 default); ``schema_upgrade_schedule`` is the list of scheduled/applied/
+    # cancelled upgrade entries the runner checks against the virtual clock each tick
+    # (the persisted jsonb shape — see streams.application.schema_upgrades).
+    schema_version_pins: dict[str, Any]
+    schema_upgrade_schedule: list[dict[str, Any]]
     # Lifecycle (so the runner knows whether it is converging: starting → running).
     lifecycle_state: str
     status_reason: str
@@ -89,6 +99,17 @@ class DesiredState:
     clock_mode: str
     backfill_days: int | None
     shard_count: int
+    # The drift field menu (§11, DR-1 / EM-5): per business subject the next
+    # registered version + its added fields, computed against the stream's CURRENT
+    # effective version. The chaos ``schema_drift`` stage reads ONLY this snapshot
+    # (never the registry directly); the runner wraps it in a ``menu_for`` provider
+    # and hands it to the pure engine as the ``registry_view`` port. Keyed on the
+    # effective version, so an applied mid-stream upgrade automatically drops the
+    # now-effective fields on the next refresh (DR-4). Empty when no subject has a
+    # registered next version (the mode would be a no-op; CH-V07 rejects arming it).
+    # Default-empty so callers/tests that build a DesiredState without the menu (and
+    # the runner before its first checkpoint materializes the pin) still construct.
+    registry_view: dict[str, DriftMenuEntry] = field(default_factory=dict)
 
     @property
     def is_stopped(self) -> bool:
@@ -106,6 +127,10 @@ def _to_desired(stream: Stream) -> DesiredState:
         run_state=stream.desired_state,
         target_tps=stream.target_tps,
         chaos_config=dict(stream.chaos_config or {}),
+        schema_version_pins=dict(stream.schema_version_pins or {}),
+        schema_upgrade_schedule=[
+            dict(e) for e in (stream.schema_upgrade_schedule or []) if isinstance(e, dict)
+        ],
         lifecycle_state=stream.lifecycle_state,
         status_reason=stream.status_reason,
         seed=stream.seed,
@@ -119,7 +144,51 @@ def _to_desired(stream: Stream) -> DesiredState:
         clock_mode=stream.clock_mode,
         backfill_days=stream.backfill_days,
         shard_count=stream.shard_count,
+        registry_view=_registry_view_for(stream),
     )
+
+
+def _registry_view_for(stream: Stream) -> dict[str, DriftMenuEntry]:
+    """Build the per-poll drift field menu for one stream (§11, DR-1 / EM-5).
+
+    The menu is computed against the stream's CURRENT effective version, so it is
+    refreshed every desired-state poll and rebuilds automatically after a mid-stream
+    upgrade applies (DR-4). The effective map folds the materialized pin (PIN-R1/R2,
+    persisted in the first checkpoint) with the highest applied upgrade target
+    (§10.2) — both read through the schema-pins seam. Before the first checkpoint the
+    materialized map is empty, so the menu is empty until the runner has materialized
+    the pin; that is correct (drift cannot arm on a never-started stream).
+
+    Defensive: any error resolving the menu (a malformed manifest, a registry hiccup)
+    degrades to an empty menu rather than failing the whole desired-state poll — the
+    drift stage then no-ops, never the worse failure of a broken reconcile loop.
+    """
+    from registry.application.drift_menu import build_drift_menu
+    from streams.application.schema_pins import (
+        applied_from_checkpoint,
+        effective_versions,
+        materialize_pins,
+        materialized_from_checkpoint,
+    )
+
+    manifest = dict(stream.pinned_config or {})
+    if not manifest:
+        return {}
+    try:
+        materialized = materialized_from_checkpoint(stream.id)
+        if not materialized:
+            # Pre-first-checkpoint: resolve PIN-R1/R2 on the fly so the menu is correct
+            # from the very first tick (the runner persists the same map at first start).
+            materialized = materialize_pins(
+                dict(stream.schema_version_pins or {}), manifest=manifest
+            )
+        applied = applied_from_checkpoint(stream.id)
+        effective = effective_versions(materialized, applied)
+        if not effective:
+            return {}
+        return build_drift_menu(effective=effective, workspace_id=None)
+    except Exception:  # never let menu resolution break the reconcile poll
+        return {}
 
 
 def claimable_desired_states() -> list[DesiredState]:

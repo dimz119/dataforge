@@ -250,6 +250,32 @@ class PayloadTooLarge(ProblemException):
 
 
 # --- 422 -------------------------------------------------------------------
+class PinValidationFailed(ProblemException):
+    """422 — a stream ``schema_version_pins`` entry is invalid (schema-registry PIN-R3).
+
+    The pin map is validated at stream create (§10.1): every key must be a subject the
+    stream's scenario emits, every value a registered version of it. Violations surface
+    as ``422`` with the ``validation-error`` slug (the api-spec §2.7.1 catalog type for
+    bad request content) and an ``errors[] {code, path, message}`` extension naming each
+    bad entry — the same extension shape the manifest 422 uses.
+    """
+
+    status_code = status.HTTP_422_UNPROCESSABLE_ENTITY
+    default_detail = "One or more schema_version_pins entries are invalid."
+    slug = Slug.VALIDATION_ERROR
+
+    def __init__(
+        self,
+        detail: str | None = None,
+        *,
+        errors: list[dict[str, Any]],
+        **kwargs: Any,
+    ) -> None:
+        extensions = dict(kwargs.pop("extensions", {}) or {})
+        extensions["errors"] = errors
+        super().__init__(detail, extensions=extensions, **kwargs)
+
+
 class ManifestValidationFailed(ProblemException):
     """422 — manifest or configuration-overlay semantic validation failure (§2.7.4).
 
@@ -347,6 +373,7 @@ __all__ = [
     "NotFoundError",
     "PayloadTooLarge",
     "PermissionDeniedError",
+    "PinValidationFailed",
     "ProblemException",
     "QuotaExceeded",
     "RateLimited",

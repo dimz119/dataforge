@@ -14,6 +14,14 @@ from registry.api import viewsets
 
 urlpatterns = [
     path("schemas", viewsets.SchemaCollectionView.as_view(), name="schemas"),
+    # The diff route carries a distinct ``/diff`` suffix (the ``str`` converter
+    # matches a dotted subject but stops at ``/``), so it never collides with the
+    # detail or versions routes; ``?from=&to=`` are query params, not path segments.
+    path(
+        "schemas/<str:subject>/diff",
+        viewsets.SchemaDiffView.as_view(),
+        name="schema-diff",
+    ),
     path("schemas/<str:subject>", viewsets.SchemaDetailView.as_view(), name="schema-detail"),
     path(
         "schemas/<str:subject>/versions",

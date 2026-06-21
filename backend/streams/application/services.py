@@ -134,6 +134,7 @@ class StreamCreateInput:
     seed: int | None
     target_tps: int
     chaos_config: dict[str, Any]
+    schema_version_pins: dict[str, Any]
     virtual_epoch: Any | None
     speed_multiplier: Any
     clock_mode: str
@@ -215,6 +216,13 @@ def create_stream(*, workspace: Any, data: StreamCreateInput, actor: Any) -> Str
             "Stream creation requires a user session (JWT); API keys cannot create streams."
         )
     pin = _resolve_instance_pin(data.scenario_instance_id, workspace_id=workspace.id)
+    # PIN-R3 (schema-registry §10.1): validate any explicit schema_version_pins
+    # against the pinned manifest's emitted subjects + the registry's registered
+    # versions BEFORE the row is created — a bad pin → 422 validation-error, never a
+    # half-created stream. An empty map is the PIN-R1 latest-at-first-start default.
+    from streams.application.schema_pins import validate_pins
+
+    validate_pins(data.schema_version_pins, manifest=pin.merged_config)
     seed = data.seed if data.seed is not None else generate_seed()
     virtual_epoch = data.virtual_epoch or timezone.now()
     with transaction.atomic():
@@ -232,6 +240,7 @@ def create_stream(*, workspace: Any, data: StreamCreateInput, actor: Any) -> Str
             desired_state=RUN_STOPPED,
             target_tps=data.target_tps,
             chaos_config=data.chaos_config,
+            schema_version_pins=dict(data.schema_version_pins or {}),
             lifecycle_state=LC_CREATED,
             status_reason=REASON_NONE,
             virtual_epoch=virtual_epoch,

@@ -9,22 +9,22 @@ interface NavItem {
 
 /**
  * Workspace SideNav (frontend-architecture §3.1). Renders the Phase-7 navigation
- * for the active workspace. Reserved-not-rendered slots (per the deferral rules):
- *  - "Schemas" (registry browser) → Phase 10
+ * for the active workspace. The "Schemas" registry-browser slot activates in Phase 10.
+ * Reserved-not-rendered slots (per the deferral rules):
  *  - "Channels" (external sinks) → Phase 12
- * Their feature folders/routes do not exist yet; the slots are commented so the
- * nav order is stable when they land.
+ * Their feature folders/routes do not exist yet; the slot is commented so the
+ * nav order is stable when it lands.
  */
 export function SideNav({ slug }: { slug: string }) {
   const base = `/w/${slug}`;
   const items: NavItem[] = [
     { to: `${base}/dashboard`, label: 'Dashboard' },
     { to: `${base}/scenarios`, label: 'Scenarios' },
+    { to: `${base}/schemas`, label: 'Schemas' },
     { to: `${base}/streams`, label: 'Streams' },
     { to: `${base}/monitoring`, label: 'Monitoring' },
     { to: `${base}/api-keys`, label: 'API keys' },
     { to: `${base}/settings`, label: 'Settings' },
-    // Phase 10: { to: `${base}/schemas`, label: 'Schemas' },
     // Phase 12: { to: `${base}/channels`, label: 'Channels' },
   ];
 

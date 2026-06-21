@@ -13,13 +13,23 @@ const ScenarioDetailPage = lazy(() =>
 const InstanceConfigPage = lazy(() =>
   import('./pages/InstanceConfigPage').then((m) => ({ default: m.InstanceConfigPage })),
 );
+const RegistryBrowserPage = lazy(() =>
+  import('./pages/RegistryBrowserPage').then((m) => ({ default: m.RegistryBrowserPage })),
+);
+const SubjectDetailPage = lazy(() =>
+  import('./pages/SubjectDetailPage').then((m) => ({ default: m.SubjectDetailPage })),
+);
 
 /**
  * Workspace-scoped scenario routes, mounted under /w/:slug by app/router.tsx.
- * The two /schemas registry-browser routes appear in Phase 10 (§3.1) — absent here.
+ * The two /schemas registry-browser routes activate in Phase 10 (§3.1).
  */
 export const scenariosRoutes: RouteObject[] = [
   { path: 'scenarios', element: <CatalogPage /> },
   { path: 'scenarios/:scenarioSlug', element: <ScenarioDetailPage /> },
   { path: 'scenarios/instances/:instanceId', element: <InstanceConfigPage /> },
+  // Schema registry browser (Phase 10). `:subject` is a dotted/URI-encoded subject
+  // name (e.g. `ecommerce.order_placed`), decoded by the SubjectDetailPage.
+  { path: 'schemas', element: <RegistryBrowserPage /> },
+  { path: 'schemas/:subject', element: <SubjectDetailPage /> },
 ];

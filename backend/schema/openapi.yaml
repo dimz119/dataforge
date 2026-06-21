@@ -530,9 +530,7 @@ paths:
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/SubjectSummary'
+                $ref: '#/components/schemas/SchemaSubjectPage'
           description: ''
   /api/v1/schemas/{subject}:
     get:
@@ -556,6 +554,47 @@ paths:
               schema:
                 $ref: '#/components/schemas/SubjectDetail'
           description: ''
+  /api/v1/schemas/{subject}/diff:
+    get:
+      operationId: schemas_diff_retrieve
+      description: |-
+        GET /schemas/{subject}/diff?from=a&to=b (api-spec §4.12 #66).
+
+        The computed added-fields diff between two registered versions (§5.3): ``added``
+        is ``properties(to) \ properties(from)`` recursively (incl. fields added inside
+        an existing nested object), each ``{path, type, required:false}``. Under
+        ``BACKWARD_ADDITIVE`` ``removed``/``changed`` are empty by construction
+        (INV-REG-3); they exist in the shape for V-2. ``404`` if either version is
+        absent; ``400`` ``validation-error`` if ``from ≥ to`` (a diff is forward-only).
+        The diff is computed, never stored (§3.2). Auth is ``schemas:read`` (A-4).
+      parameters:
+      - in: query
+        name: from
+        schema:
+          type: integer
+        required: true
+      - in: path
+        name: subject
+        schema:
+          type: string
+        required: true
+      - in: query
+        name: to
+        schema:
+          type: integer
+        required: true
+      tags:
+      - schemas
+      security:
+      - apiKeyAuth: []
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SchemaDiff'
+          description: ''
   /api/v1/schemas/{subject}/versions:
     get:
       operationId: schemas_versions_list
@@ -576,9 +615,7 @@ paths:
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/VersionProvenance'
+                $ref: '#/components/schemas/SchemaVersionPage'
           description: ''
   /api/v1/schemas/{subject}/versions/{schema_version}:
     get:
@@ -1047,6 +1084,135 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/StreamResponse'
+          description: ''
+  /api/v1/streams/{stream_id}/schema-upgrades:
+    get:
+      operationId: streams_schema_upgrades_list
+      description: |-
+        POST | GET /streams/{stream_id}/schema-upgrades (api-spec §4.8.4 #50-51).
+
+        POST schedules a mid-stream additive evolution (REG-U001..U007 validation →
+        409 ``conflict`` with the ``errors[]`` extension on failure); ``streams:write``.
+        Idempotency-Key (I-1): a repeat with the same key returns the already-scheduled
+        entry (still 201, no duplicate). GET lists every entry
+        (``scheduled``/``applied``/``cancelled``, the cancelled retained); ``streams:read``.
+      parameters:
+      - in: path
+        name: stream_id
+        schema:
+          type: string
+        required: true
+      tags:
+      - streams
+      security:
+      - apiKeyAuth: []
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StreamSchemaUpgradePage'
+          description: ''
+    post:
+      operationId: streams_schema_upgrades_create
+      description: |-
+        POST | GET /streams/{stream_id}/schema-upgrades (api-spec §4.8.4 #50-51).
+
+        POST schedules a mid-stream additive evolution (REG-U001..U007 validation →
+        409 ``conflict`` with the ``errors[]`` extension on failure); ``streams:write``.
+        Idempotency-Key (I-1): a repeat with the same key returns the already-scheduled
+        entry (still 201, no duplicate). GET lists every entry
+        (``scheduled``/``applied``/``cancelled``, the cancelled retained); ``streams:read``.
+      parameters:
+      - in: path
+        name: stream_id
+        schema:
+          type: string
+        required: true
+      tags:
+      - streams
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SchemaUpgradeCreate'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/SchemaUpgradeCreate'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/SchemaUpgradeCreate'
+        required: true
+      security:
+      - apiKeyAuth: []
+      - jwtAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SchemaUpgradeResponse'
+          description: ''
+  /api/v1/streams/{stream_id}/schema-upgrades/{upgrade_id}:
+    delete:
+      operationId: streams_schema_upgrades_cancel
+      description: |-
+        DELETE /streams/{stream_id}/schema-upgrades/{upgrade_id} (api-spec §4.8.4 #52).
+
+        Cancels a ``scheduled`` entry (→ 204); a non-``scheduled`` entry → 409
+        ``invalid-state-transition``; an unknown id → 404. The cancelled entry is retained
+        in the list (irreversible history is the audit posture, §10.3). ``streams:write``.
+      parameters:
+      - in: path
+        name: stream_id
+        schema:
+          type: string
+        required: true
+      - in: path
+        name: upgrade_id
+        schema:
+          type: string
+        required: true
+      tags:
+      - streams
+      security:
+      - apiKeyAuth: []
+      - jwtAuth: []
+      responses:
+        '204':
+          description: No response body
+  /api/v1/streams/{stream_id}/schema-versions:
+    get:
+      operationId: streams_schema_versions
+      description: |-
+        GET /streams/{stream_id}/schema-versions (schema-registry §10.2; #?).
+
+        The per-stream effective schema-version projection ``{effective, pending,
+        applied}``: ``effective`` the §10.2 ``max(materialized pin, highest applied
+        upgrade target)`` map per subject (the materialized pin lives in the checkpoint
+        after first start; a preview from the pinned manifest before it); ``pending`` the
+        ``scheduled`` upgrade entries awaiting their simulated-time cutover; ``applied``
+        the applied entries (with ``applied_at_wall``/``applied_sequence_no``). Cancelled
+        entries are surfaced only on the upgrade-list endpoint. ``streams:read``; a
+        foreign-workspace credential masks to 404 (W-1/W-3) via the shared resolver.
+      parameters:
+      - in: path
+        name: stream_id
+        schema:
+          type: string
+        required: true
+      tags:
+      - streams
+      security:
+      - apiKeyAuth: []
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StreamSchemaVersionsResponse'
           description: ''
   /api/v1/streams/{stream_id}/start:
     post:
@@ -1694,6 +1860,20 @@ paths:
           description: ''
 components:
   schemas:
+    AddedField:
+      type: object
+      description: One added property in the computed diff (#66).
+      properties:
+        path:
+          type: string
+        type:
+          type: string
+        required:
+          type: boolean
+      required:
+      - path
+      - required
+      - type
     AnswerKeyInjection:
       type: object
       description: |-
@@ -2513,6 +2693,141 @@ components:
       - scenario_slug
       - title
       - visibility
+    SchemaDiff:
+      type: object
+      description: |-
+        The computed version-to-version diff (#66).
+
+        Under ``BACKWARD_ADDITIVE`` (the only MVP mode) ``removed_fields`` /
+        ``changed_fields`` are always empty by construction (INV-REG-3); they are in the
+        shape so the contract survives a future compatibility-mode addition (V-2).
+      properties:
+        subject:
+          type: string
+        from_version:
+          type: integer
+        to_version:
+          type: integer
+        added_fields:
+          type: array
+          items:
+            $ref: '#/components/schemas/AddedField'
+        removed_fields:
+          type: array
+          items:
+            $ref: '#/components/schemas/AddedField'
+        changed_fields:
+          type: array
+          items:
+            $ref: '#/components/schemas/AddedField'
+      required:
+      - added_fields
+      - changed_fields
+      - from_version
+      - removed_fields
+      - subject
+      - to_version
+    SchemaSubjectPage:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/SubjectSummary'
+        next_cursor:
+          type: string
+          nullable: true
+      required:
+      - data
+      - next_cursor
+    SchemaUpgradeCreate:
+      type: object
+      description: |-
+        ``POST /streams/{id}/schema-upgrades`` body (api-spec §4.8.4 / schema-registry §10.3).
+
+        ``subject`` is the dotted subject name; ``target_version`` the registered version
+        to evolve to (≥ 1). ``at`` is the SIMULATED-time cutover instant (``occurred_at``
+        domain) — optional; omitted means "the next tick boundary" (effectively
+        immediately). The REG-U001..U007 semantic checks run in the service against the
+        stream's pinned manifest + virtual clock (this serializer only shapes the wire).
+      properties:
+        subject:
+          type: string
+          maxLength: 255
+          minLength: 1
+        target_version:
+          type: integer
+          minimum: 1
+        at:
+          type: string
+          format: date-time
+          nullable: true
+      required:
+      - subject
+      - target_version
+    SchemaUpgradeResponse:
+      type: object
+      description: |-
+        The schema-upgrade resource on the wire (api-spec §4.8.4 #50-52).
+
+        The ``scheduled`` 201 carries ``upgrade_id``/``status``/``created_at``; ``applied``
+        entries additionally carry ``applied_at_wall`` and the per-shard
+        ``applied_sequence_no`` written by the runner cutover (§10.4); ``cancelled`` entries
+        carry ``cancelled_at``. ``at`` is the simulated-time cutover instant (null ⇒ next
+        tick). The output is assembled from the persisted jsonb entry (the runner and the
+        cancel path complete the optional members in place).
+      properties:
+        upgrade_id:
+          type: string
+          format: uuid
+        stream_id:
+          type: string
+          format: uuid
+        subject:
+          type: string
+        target_version:
+          type: integer
+        at:
+          type: string
+          format: date-time
+          nullable: true
+        status:
+          $ref: '#/components/schemas/StatusEnum'
+        created_at:
+          type: string
+          format: date-time
+        applied_at_wall:
+          type: string
+          format: date-time
+          nullable: true
+        applied_sequence_no:
+          type: integer
+          nullable: true
+        cancelled_at:
+          type: string
+          format: date-time
+          nullable: true
+      required:
+      - at
+      - created_at
+      - status
+      - stream_id
+      - subject
+      - target_version
+      - upgrade_id
+    SchemaVersionPage:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/VersionProvenance'
+        next_cursor:
+          type: string
+          nullable: true
+      required:
+      - data
+      - next_cursor
     ScopesEnum:
       enum:
       - events:read
@@ -2561,6 +2876,16 @@ components:
       - email
       - is_verified
       - user_id
+    StatusEnum:
+      enum:
+      - scheduled
+      - applied
+      - cancelled
+      type: string
+      description: |-
+        * `scheduled` - scheduled
+        * `applied` - applied
+        * `cancelled` - cancelled
     StreamCreate:
       type: object
       description: |-
@@ -2593,6 +2918,11 @@ components:
         chaos:
           type: object
           additionalProperties: {}
+        schema_version_pins:
+          type: object
+          additionalProperties:
+            type: integer
+            minimum: 1
         virtual_clock:
           $ref: '#/components/schemas/VirtualClockInput'
       required:
@@ -2650,6 +2980,10 @@ components:
           $ref: '#/components/schemas/_DesiredState'
         virtual_clock:
           $ref: '#/components/schemas/_VirtualClock'
+        schema_versions:
+          type: object
+          additionalProperties:
+            type: integer
         shard_count:
           type: integer
         created_at:
@@ -2673,6 +3007,7 @@ components:
       - pin_sha256
       - scenario_instance_id
       - scenario_slug
+      - schema_versions
       - seed
       - shard_count
       - started_at
@@ -2681,6 +3016,47 @@ components:
       - stream_id
       - virtual_clock
       - workspace_id
+    StreamSchemaUpgradePage:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/SchemaUpgradeResponse'
+        next_cursor:
+          type: string
+          nullable: true
+      required:
+      - data
+      - next_cursor
+    StreamSchemaVersionsResponse:
+      type: object
+      description: |-
+        ``GET /streams/{id}/schema-versions`` → ``{effective, pending, applied}`` (§10.2).
+
+        ``effective`` is the per-subject effective-version map
+        (``effective = max(materialized pin, highest applied upgrade target)``); ``{}``
+        before first start. ``pending`` is the ``scheduled`` upgrade entries (awaiting
+        their simulated-time cutover); ``applied`` the ``applied`` entries (each carrying
+        ``applied_at_wall`` + ``applied_sequence_no``). Cancelled entries are history,
+        surfaced only on the upgrade-list endpoint, not here.
+      properties:
+        effective:
+          type: object
+          additionalProperties:
+            type: integer
+        pending:
+          type: array
+          items:
+            $ref: '#/components/schemas/SchemaUpgradeResponse'
+        applied:
+          type: array
+          items:
+            $ref: '#/components/schemas/SchemaUpgradeResponse'
+      required:
+      - applied
+      - effective
+      - pending
     StreamStatsResponse:
       type: object
       description: |-

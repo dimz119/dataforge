@@ -220,6 +220,20 @@ ACCESS_POLICY: dict[tuple[str, str], RouteClass] = {
     ("GET", "/api/v1/schemas/{subject}"): RouteClass.GLOBAL_READ,
     ("GET", "/api/v1/schemas/{subject}/versions"): RouteClass.GLOBAL_READ,
     ("GET", "/api/v1/schemas/{subject}/versions/{schema_version}"): RouteClass.GLOBAL_READ,
+    # Phase 10 schema diff (global-readable registry, same class as the other reads).
+    ("GET", "/api/v1/schemas/{subject}/diff"): RouteClass.GLOBAL_READ,
+    # --- Streams: Phase 10 schema-version + upgrade sub-resources -------------
+    # Dual JWT|Key surfaces over a stream id; the stream's owning workspace masks
+    # foreign access to 404 for both credential types (W-1/W-3). No credential →
+    # 401. SCOPE captures foreign_jwt→404, foreign_key→404, no_cred→401 — identical
+    # to GET {id} (reads, streams:read) and to pause/chaos (writes, streams:write).
+    ("GET", "/api/v1/streams/{stream_id}/schema-versions"): RouteClass.SCOPE,
+    ("GET", "/api/v1/streams/{stream_id}/schema-upgrades"): RouteClass.SCOPE,
+    ("POST", "/api/v1/streams/{stream_id}/schema-upgrades"): RouteClass.SCOPE,
+    (
+        "DELETE",
+        "/api/v1/streams/{stream_id}/schema-upgrades/{upgrade_id}",
+    ): RouteClass.SCOPE,
 }
 
 
@@ -268,7 +282,10 @@ def expectations(route_class: RouteClass) -> dict[str, CredentialExpectation]:
         # Globals + the caller's OWN data only. A collection (no path id) → 200
         # carrying globals/own data; a resource read with a literal foreign
         # slug/subject → 404 (the literal is unknown to B). Never A's private rows.
-        own = CredentialExpectation(frozenset({200, 404}), allow_own_data=True)
+        # A read with required query params (e.g. /schemas/{subject}/diff?from&to)
+        # validation-errors to 400 with the empty probe params before any lookup —
+        # leak-free (the sentinel scan still runs), so 400 is admitted too.
+        own = CredentialExpectation(frozenset({200, 400, 404}), allow_own_data=True)
         return {"foreign_jwt": own, "foreign_key": own, "no_cred": CredentialExpectation(
             frozenset({401})
         )}

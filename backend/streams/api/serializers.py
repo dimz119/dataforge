@@ -53,6 +53,14 @@ class StreamCreateSerializer(serializers.Serializer[Any]):
         required=False, default=10, min_value=_TPS_MIN, max_value=_TPS_MAX
     )
     chaos = serializers.DictField(required=False, default=dict)
+    # Per-subject schema pins (schema-registry §10.1): {subject: version}. Empty (the
+    # default) = latest-at-first-start (PIN-R1); explicit entries override per subject
+    # (PIN-R2). The values must be positive integers (a registered version number);
+    # the subject-emits + version-exists checks (PIN-R3) run in the service against the
+    # pinned manifest → 422 with errors[]. Part of the determinism pin (INV-STR-5).
+    schema_version_pins = serializers.DictField(
+        child=serializers.IntegerField(min_value=1), required=False, default=dict
+    )
     virtual_clock = VirtualClockInputSerializer(required=False)
 
     def validate_seed(self, value: str | None) -> int | None:
@@ -118,10 +126,69 @@ class StreamResponseSerializer(serializers.Serializer[Any]):
     status_reason = serializers.CharField()
     desired_state = _DesiredStateSerializer()
     virtual_clock = _VirtualClockSerializer()
+    # The effective per-subject schema-version map (schema-registry §10.2, additive
+    # Phase 10 response field per V-2): {subject: version}, folding the materialized
+    # pin with the highest applied upgrade target. ``{}`` before first start (the
+    # materialized map is resolved once at T1→T3 and lives in the checkpoint).
+    schema_versions = serializers.DictField(child=serializers.IntegerField())
     shard_count = serializers.IntegerField()
     created_at = serializers.DateTimeField()
     started_at = serializers.DateTimeField(allow_null=True)
     last_transition_at = serializers.DateTimeField(allow_null=True)
+
+
+class SchemaUpgradeCreateSerializer(serializers.Serializer[Any]):
+    """``POST /streams/{id}/schema-upgrades`` body (api-spec §4.8.4 / schema-registry §10.3).
+
+    ``subject`` is the dotted subject name; ``target_version`` the registered version
+    to evolve to (≥ 1). ``at`` is the SIMULATED-time cutover instant (``occurred_at``
+    domain) — optional; omitted means "the next tick boundary" (effectively
+    immediately). The REG-U001..U007 semantic checks run in the service against the
+    stream's pinned manifest + virtual clock (this serializer only shapes the wire).
+    """
+
+    subject = serializers.CharField(min_length=1, max_length=255)
+    target_version = serializers.IntegerField(min_value=1)
+    at = serializers.DateTimeField(required=False, allow_null=True)
+
+
+class SchemaUpgradeResponseSerializer(serializers.Serializer[Any]):
+    """The schema-upgrade resource on the wire (api-spec §4.8.4 #50-52).
+
+    The ``scheduled`` 201 carries ``upgrade_id``/``status``/``created_at``; ``applied``
+    entries additionally carry ``applied_at_wall`` and the per-shard
+    ``applied_sequence_no`` written by the runner cutover (§10.4); ``cancelled`` entries
+    carry ``cancelled_at``. ``at`` is the simulated-time cutover instant (null ⇒ next
+    tick). The output is assembled from the persisted jsonb entry (the runner and the
+    cancel path complete the optional members in place).
+    """
+
+    upgrade_id = serializers.UUIDField()
+    stream_id = serializers.UUIDField()
+    subject = serializers.CharField()
+    target_version = serializers.IntegerField()
+    at = serializers.DateTimeField(allow_null=True)
+    status = serializers.ChoiceField(choices=["scheduled", "applied", "cancelled"])
+    created_at = serializers.DateTimeField()
+    applied_at_wall = serializers.DateTimeField(allow_null=True, required=False)
+    applied_sequence_no = serializers.IntegerField(allow_null=True, required=False)
+    cancelled_at = serializers.DateTimeField(allow_null=True, required=False)
+
+
+class StreamSchemaVersionsResponseSerializer(serializers.Serializer[Any]):
+    """``GET /streams/{id}/schema-versions`` → ``{effective, pending, applied}`` (§10.2).
+
+    ``effective`` is the per-subject effective-version map
+    (``effective = max(materialized pin, highest applied upgrade target)``); ``{}``
+    before first start. ``pending`` is the ``scheduled`` upgrade entries (awaiting
+    their simulated-time cutover); ``applied`` the ``applied`` entries (each carrying
+    ``applied_at_wall`` + ``applied_sequence_no``). Cancelled entries are history,
+    surfaced only on the upgrade-list endpoint, not here.
+    """
+
+    effective = serializers.DictField(child=serializers.IntegerField())
+    pending = SchemaUpgradeResponseSerializer(many=True)
+    applied = SchemaUpgradeResponseSerializer(many=True)
 
 
 class _StatsBufferSerializer(serializers.Serializer[Any]):

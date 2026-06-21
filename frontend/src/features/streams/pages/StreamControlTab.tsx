@@ -28,5 +28,5 @@ export function StreamControlTab() {
   if (stream.error) return <ErrorState error={stream.error} onRetry={() => void stream.refetch()} />;
 
   const data = live.data ?? stream.data;
-  return <StreamControlPanel workspaceId={ws.workspaceId} stream={data} />;
+  return <StreamControlPanel workspaceId={ws.workspaceId} slug={ws.slug} stream={data} />;
 }

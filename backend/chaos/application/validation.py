@@ -15,7 +15,11 @@ from typing import Any
 
 from dataforge_engine.chaos import CHAOS_MODES, RATE_MAX
 
-__all__ = ["ChaosPolicyInvalid", "validate_chaos_patch"]
+__all__ = [
+    "ChaosPolicyInvalid",
+    "validate_chaos_patch",
+    "validate_drift_arming",
+]
 
 _MODE_SET = frozenset(CHAOS_MODES)
 _ON_STOP_VALUES = frozenset({"discard", "flush"})
@@ -96,3 +100,49 @@ def validate_chaos_patch(body: dict[str, Any]) -> None:
             errors.append(_rate_error(key, rate))
     if errors:
         raise ChaosPolicyInvalid(errors)
+
+
+def validate_drift_arming(
+    *,
+    resulting_config: dict[str, Any],
+    effective: dict[str, int],
+    workspace_id: Any | None,
+) -> None:
+    """CH-V07 (schema-registry §11 DR-3): drift needs ≥ 1 eligible business subject.
+
+    A registry-aware companion to :func:`validate_chaos_patch` (which is pure / shape
+    + rate only). When the *resulting* chaos document (the stored config merged with
+    the PATCH) has ``schema_drift`` enabled, at least one business subject the stream
+    emits must have a registered version above its effective version — otherwise the
+    mode could never draw a field (a structural no-op) and arming it is rejected. The
+    eligibility test is the drift-menu builder (§11 DR-1): a non-empty menu ⇒ eligible.
+
+    ``effective`` is the stream's §10.2 effective ``{subject: version}`` map (from
+    :func:`streams.application.schema_pins.effective_versions`); ``resulting_config``
+    is the merged document, not the partial PATCH (so disabling drift in the PATCH, or
+    a PATCH that does not touch drift while it is already disabled, never trips this).
+    Per-subject ineligibility with the mode otherwise armed is NOT an error — ineligible
+    subjects are simply never selected (DR-3). Raises :class:`ChaosPolicyInvalid` whose
+    single ``errors[]`` row the ``manifest-validation-failed`` (422) problem renders.
+    """
+    drift = resulting_config.get("schema_drift")
+    if not (isinstance(drift, dict) and drift.get("enabled")):
+        return  # drift not armed in the resulting config ⇒ nothing to check
+    from registry.application.drift_menu import drift_arming_eligible
+
+    if drift_arming_eligible(effective=effective, workspace_id=workspace_id):
+        return
+    raise ChaosPolicyInvalid(
+        [
+            {
+                "code": "CH-V07",
+                "path": "/schema_drift/enabled",
+                "message": (
+                    "schema_drift cannot arm: no subject this stream emits has a "
+                    "registered version above its effective version (register or "
+                    "schedule an upgrade to a higher version first)."
+                ),
+                "scope": "chaos",
+            }
+        ]
+    )
