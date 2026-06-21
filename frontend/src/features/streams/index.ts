@@ -42,6 +42,24 @@ export {
 export { PinSummary, type PinSummaryProps } from './components/PinSummary';
 export { StreamDangerZone, type StreamDangerZoneProps } from './components/StreamDangerZone';
 
+// Schema panel + scheduling form (Phase 10, §9.5 / §10).
+export { SchemaPanel, type SchemaPanelProps } from './components/SchemaPanel';
+export {
+  ScheduleUpgradeForm,
+  type ScheduleUpgradeFormProps,
+} from './components/ScheduleUpgradeForm';
+export {
+  UpgradeScheduleList,
+  type UpgradeScheduleListProps,
+} from './components/UpgradeScheduleList';
+export {
+  cutoverCountdown,
+  projectVirtualNowMs,
+  formatDuration,
+  type VirtualClockSample,
+  type CutoverCountdown,
+} from './simulatedTime';
+
 // Data layer (§4): single-stream detail, create, lifecycle verbs, live target_tps.
 export {
   streamQueryOptions,
@@ -49,4 +67,10 @@ export {
   useCreateStream,
   useStreamLifecycle,
   useSetTargetTps,
+  // Schema pinning + scheduled upgrades (Phase 10, §10).
+  streamSchemaVersionsQueryOptions,
+  streamSchemaUpgradesQueryOptions,
+  subjectsQueryOptions,
+  useScheduleSchemaUpgrade,
+  useCancelSchemaUpgrade,
 } from './api';

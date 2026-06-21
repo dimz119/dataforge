@@ -13,7 +13,18 @@ export {
   manifestQueryOptions,
   useCreateInstance,
   useSaveInstanceConfig,
+  // Schema registry (Phase 10, §9.4).
+  subjectsQueryOptions,
+  subjectQueryOptions,
+  subjectVersionsQueryOptions,
+  subjectVersionQueryOptions,
+  schemaDiffQueryOptions,
 } from './api';
+export { SchemaDiff, type SchemaDiffProps } from './components/SchemaDiff';
+export {
+  SchemaVersionViewer,
+  type SchemaVersionViewerProps,
+} from './components/SchemaVersionViewer';
 
 // Overlay shape + manifest readers + the OverlayErrorMap (§9.4).
 export {

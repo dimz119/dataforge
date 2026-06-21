@@ -9,6 +9,7 @@ import { api } from '../../shared/api/client';
 import { invalidate } from '../../shared/api/invalidation';
 import { ApiError } from '../../shared/api/problem';
 import { queryKeys, staleTimes } from '../../shared/api/queryKeys';
+import { skipToken } from '@tanstack/react-query';
 import type {
   Configuration,
   ConfigurationReplace,
@@ -17,6 +18,11 @@ import type {
   ScenarioDetail,
   ScenarioInstance,
   ScenarioSummary,
+  SchemaDiff,
+  SubjectDetail,
+  SubjectSummary,
+  VersionProvenance,
+  VersionRecord,
 } from '../../shared/api/types';
 
 /** `['w', id, 'scenarios']` → catalog summaries (§9.4 CatalogGrid). */
@@ -162,5 +168,105 @@ export function useCreateInstance(wsId: string) {
       return data;
     },
     onSuccess: () => invalidate.onInstancesChanged(qc, wsId),
+  });
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Schema registry (Phase 10, frontend-architecture §3.1/§9.4). Subjects + version
+// timelines are session-stable (5-min staleTime); a single version document and the
+// version-to-version diff are IMMUTABLE (staleTime Infinity, INV-REG-2/3) — once a
+// version is registered it never changes, and the additive diff is a pure function of
+// two immutable documents. All four reads need `schemas:read`.
+// ───────────────────────────────────────────────────────────────────────────
+
+/** `['w', id, 'schemas']` → the registry subject list (#62, RegistryBrowserPage table). */
+export function subjectsQueryOptions(wsId: string) {
+  return queryOptions({
+    queryKey: queryKeys.schemas(wsId),
+    staleTime: staleTimes.schemas,
+    queryFn: async (): Promise<SubjectSummary[]> => {
+      const { data, error } = await api.GET('/api/v1/schemas');
+      if (error) throw error as ApiError;
+      return data;
+    },
+  });
+}
+
+/** `['w', id, 'schemas', subject]` → subject detail with per-version provenance (#63). */
+export function subjectQueryOptions(wsId: string, subject: string) {
+  return queryOptions({
+    queryKey: queryKeys.schema(wsId, subject),
+    staleTime: staleTimes.schemas,
+    queryFn: async (): Promise<SubjectDetail> => {
+      const { data, error } = await api.GET('/api/v1/schemas/{subject}', {
+        params: { path: { subject } },
+      });
+      if (error) throw error as ApiError;
+      return data;
+    },
+  });
+}
+
+/** `['w', id, 'schemas', subject, 'versions']` → the version provenance rows (#64). */
+export function subjectVersionsQueryOptions(wsId: string, subject: string) {
+  return queryOptions({
+    queryKey: queryKeys.schemaVersions(wsId, subject),
+    staleTime: staleTimes.schemaVersions,
+    queryFn: async (): Promise<VersionProvenance[]> => {
+      const { data, error } = await api.GET('/api/v1/schemas/{subject}/versions', {
+        params: { path: { subject } },
+      });
+      if (error) throw error as ApiError;
+      return data;
+    },
+  });
+}
+
+/**
+ * `['w', id, 'schemas', subject, 'versions', version]` → one version's full record
+ * including the schema document (#65). Immutable (staleTime Infinity) — the JsonViewer
+ * reads `$id`/`schema_ref` out of this document. `version` is the numeric version as a
+ * string (the path converter).
+ */
+export function subjectVersionQueryOptions(wsId: string, subject: string, version: string) {
+  return queryOptions({
+    queryKey: queryKeys.schemaVersion(wsId, subject, version),
+    staleTime: staleTimes.schemaVersion,
+    queryFn: async (): Promise<VersionRecord> => {
+      const { data, error } = await api.GET('/api/v1/schemas/{subject}/versions/{schema_version}', {
+        params: { path: { subject, schema_version: version } },
+      });
+      if (error) throw error as ApiError;
+      return data;
+    },
+  });
+}
+
+/**
+ * `['w', id, 'schemas', subject, 'diff', from, to]` → the computed additive diff (#66).
+ * Immutable (both versions are immutable, so the diff is too). `from`/`to` are version
+ * numbers; the SubjectDetailPage drives this off adjacent timeline pairs. Passing
+ * non-positive or out-of-order bounds is guarded by the caller (the API returns 400 on
+ * `from >= to`); we use `skipToken` when no diff is requested.
+ */
+export function schemaDiffQueryOptions(
+  wsId: string,
+  subject: string,
+  pair: { from: number; to: number } | null,
+) {
+  return queryOptions({
+    queryKey: pair
+      ? queryKeys.schemaDiff(wsId, subject, pair.from, pair.to)
+      : queryKeys.schemaDiff(wsId, subject, 0, 0),
+    staleTime: staleTimes.schemaVersion,
+    queryFn: pair
+      ? async (): Promise<SchemaDiff> => {
+          const { data, error } = await api.GET('/api/v1/schemas/{subject}/diff', {
+            params: { path: { subject }, query: { from: pair.from, to: pair.to } },
+          });
+          if (error) throw error as ApiError;
+          return data;
+        }
+      : skipToken,
   });
 }

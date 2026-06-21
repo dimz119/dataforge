@@ -58,3 +58,17 @@ export type ChaosPolicyResponse = Schemas['ChaosPolicyResponse'];
 export type AnswerKeySummary = Schemas['AnswerKeySummary'];
 export type AnswerKeyInjection = Schemas['AnswerKeyInjection'];
 export type AnswerKeyInjectionsPage = Schemas['AnswerKeyInjectionsPage'];
+
+// --- Schema registry (Phase 10) ---
+export type SubjectSummary = Schemas['SubjectSummary'];
+export type SubjectDetail = Schemas['SubjectDetail'];
+export type VersionProvenance = Schemas['VersionProvenance'];
+export type VersionRecord = Schemas['VersionRecord'];
+export type SchemaDiff = Schemas['SchemaDiff'];
+export type AddedField = Schemas['AddedField'];
+
+// --- Per-stream schema pinning & upgrades (Phase 10) ---
+export type StreamSchemaVersionsResponse = Schemas['StreamSchemaVersionsResponse'];
+export type StreamSchemaUpgradePage = Schemas['StreamSchemaUpgradePage'];
+export type SchemaUpgradeCreate = Schemas['SchemaUpgradeCreate'];
+export type SchemaUpgradeResponse = Schemas['SchemaUpgradeResponse'];

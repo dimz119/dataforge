@@ -44,13 +44,20 @@ export const queryKeys = {
     ['w', wsId, 'streams', streamId, 'chaos'] as const,
   streamAnswerKey: (wsId: string, streamId: string, mode: string, filters?: unknown) =>
     ['w', wsId, 'streams', streamId, 'answer-key', mode, filters ?? null] as const,
+  streamSchemaVersions: (wsId: string, streamId: string) =>
+    ['w', wsId, 'streams', streamId, 'schema-versions'] as const,
+  streamSchemaUpgrades: (wsId: string, streamId: string) =>
+    ['w', wsId, 'streams', streamId, 'schema-upgrades'] as const,
 
   // --- Schema registry (Phase 10 surfaces; keys reserved per §4.2) ---
   schemas: (wsId: string) => ['w', wsId, 'schemas'] as const,
+  schema: (wsId: string, subject: string) => ['w', wsId, 'schemas', subject] as const,
   schemaVersions: (wsId: string, subject: string) =>
     ['w', wsId, 'schemas', subject, 'versions'] as const,
   schemaVersion: (wsId: string, subject: string, version: string) =>
     ['w', wsId, 'schemas', subject, 'versions', version] as const,
+  schemaDiff: (wsId: string, subject: string, from: number, to: number) =>
+    ['w', wsId, 'schemas', subject, 'diff', from, to] as const,
 } as const;
 
 /**

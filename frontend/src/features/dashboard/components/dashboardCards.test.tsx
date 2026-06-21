@@ -30,6 +30,7 @@ function stream(status: string): StreamResponse {
     status_reason: '',
     desired_state: { run_state: 'running', target_tps: 10 },
     virtual_clock: { virtual_epoch: '2026-06-01T00:00:00Z', speed_multiplier: '1' },
+    schema_versions: {},
     shard_count: 1,
     created_at: '2026-06-01T00:00:00Z',
     started_at: null,

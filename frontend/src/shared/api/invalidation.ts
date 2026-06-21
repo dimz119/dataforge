@@ -86,4 +86,17 @@ export const invalidate = {
       qc.invalidateQueries({ queryKey: queryKeys.stream(wsId, streamId) }),
     ]);
   },
+
+  /**
+   * scheduleSchemaUpgrade / cancelSchemaUpgrade (Phase 10) → the upgrade list, the
+   * schema-versions projection (effective/pending/applied), and the stream resource
+   * (its `schema_versions` field reflects the effective map).
+   */
+  async onSchemaUpgradeChanged(qc: QueryClient, wsId: string, streamId: string): Promise<void> {
+    await Promise.all([
+      qc.invalidateQueries({ queryKey: queryKeys.streamSchemaUpgrades(wsId, streamId) }),
+      qc.invalidateQueries({ queryKey: queryKeys.streamSchemaVersions(wsId, streamId) }),
+      qc.invalidateQueries({ queryKey: queryKeys.stream(wsId, streamId) }),
+    ]);
+  },
 } as const;
