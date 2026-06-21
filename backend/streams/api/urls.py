@@ -40,4 +40,19 @@ urlpatterns = [
         viewsets.StreamStatsView.as_view(),
         name="stream-stats",
     ),
+    path(
+        "streams/<str:stream_id>/schema-versions",
+        viewsets.StreamSchemaVersionsView.as_view(),
+        name="stream-schema-versions",
+    ),
+    path(
+        "streams/<str:stream_id>/schema-upgrades",
+        viewsets.StreamSchemaUpgradeCollectionView.as_view(),
+        name="stream-schema-upgrades",
+    ),
+    path(
+        "streams/<str:stream_id>/schema-upgrades/<str:upgrade_id>",
+        viewsets.StreamSchemaUpgradeDetailView.as_view(),
+        name="stream-schema-upgrade-detail",
+    ),
 ]

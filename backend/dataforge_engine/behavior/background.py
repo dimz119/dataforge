@@ -93,6 +93,17 @@ class BackgroundMutationDriver:
             else ()
         )
 
+    def set_ir(self, ir: ManifestIR) -> None:
+        """Adopt a schema-upgrade-extended IR mid-stream (schema-registry §10.4).
+
+        Driven by :meth:`Shard.retarget_ir`. The manifest body is identical, so the
+        cached ``_active`` rule set stays valid; only the schema-evolution overlay
+        (``schema_versions``) differs. CDC subjects never carry a cutover (REG-U006), so
+        background CDC events keep stamping their derived version — the swap just keeps
+        the IR reference consistent with the rest of the shard.
+        """
+        self._ir = ir
+
     @property
     def has_rules(self) -> bool:
         return bool(self._active)

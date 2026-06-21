@@ -106,3 +106,63 @@ def test_chd6_drift_noop_without_registered_next_version() -> None:
     out = SchemaDriftStage().process(make_batch(N), ctx)
     assert all(e["_df"]["canonical"] for e in out)
     assert len(rec.records) == 0
+
+
+# -- DR-6: the v2/v3 trio (schema-registry §11 worked linkage) ---------------------
+# "every drift-injected field resolves to a registered version > effective" exercised
+# over the §9 evolution trio: effective at v1 drifts ONLY shipping_state (v2 is the
+# next version — one step, not two); after the stream upgrades to v2, the menu rebuild
+# makes shipping_city (v3) the injectable field. The drift stage reads only the menu
+# the registry_view port supplies (DR-1), so the trio is expressed as the two menus a
+# v1-effective and a v2-effective stream see — the runner's DR-4 rebuild swaps between
+# them when an upgrade applies (the menu-level rebuild is pinned in
+# tests/registry/test_drift_menu.py against the real registry).
+
+_V3_CITY = {"path": "shipping_city", "fragment": {"type": "string"}}
+
+
+def _drift_trio_context(rec: InMemoryRecorder, menu: FakeDriftMenu) -> Any:
+    ctx = make_context(rec, registry_view=FakeRegistryView({"shop.order_placed": menu}))
+    ctx.mode_config = {
+        "enabled": True,
+        "rate": 0.5,
+        "params": {"subjects": ["*"], "fields": ["*"], "event_types": ["*"]},
+    }
+    return ctx
+
+
+def test_dr6_effective_v1_drifts_only_shipping_state() -> None:
+    """DR-6: a stream effective at v1 drifts ONLY shipping_state (v2 — next, not v3)."""
+    from dataforge_engine.chaos.tests.fixtures import make_batch
+
+    rec = InMemoryRecorder()
+    ctx = _drift_trio_context(rec, FakeDriftMenu(1, 2, [dict(_V2_FIELD)]))
+    out = SchemaDriftStage().process(make_batch(N), ctx)
+    touched = [cast("dict[str, Any]", dict(e)) for e in out if not e["_df"]["canonical"]]
+    assert touched, "no drift applied"
+    for env in touched:
+        detail = cast(dict[str, Any], env["_df"]["chaos"]["schema_drift"])
+        assert (detail["from_version"], detail["to_version"]) == (1, 2)
+        added = {f["path"] for f in detail["fields_added"]}
+        assert added == {"shipping_state"}  # shipping_city (v3) is NOT injectable yet
+        assert "shipping_state" in env["payload"]
+        assert "shipping_city" not in env["payload"]
+        assert env["schema_ref"]["version"] == 1  # schema_ref keeps the effective version
+
+
+def test_dr6_after_upgrade_to_v2_drifts_only_shipping_city() -> None:
+    """DR-6: post-upgrade (effective v2) the rebuilt menu drifts ONLY shipping_city (v3)."""
+    from dataforge_engine.chaos.tests.fixtures import make_batch
+
+    rec = InMemoryRecorder()
+    ctx = _drift_trio_context(rec, FakeDriftMenu(2, 3, [dict(_V3_CITY)]))
+    out = SchemaDriftStage().process(make_batch(N), ctx)
+    touched = [cast("dict[str, Any]", dict(e)) for e in out if not e["_df"]["canonical"]]
+    assert touched, "no drift applied"
+    for env in touched:
+        detail = cast(dict[str, Any], env["_df"]["chaos"]["schema_drift"])
+        assert (detail["from_version"], detail["to_version"]) == (2, 3)
+        added = {f["path"] for f in detail["fields_added"]}
+        assert added == {"shipping_city"}  # shipping_state is now effective, not injected
+        assert "shipping_city" in env["payload"]
+        assert "shipping_state" not in env["payload"]

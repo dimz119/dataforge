@@ -18,7 +18,8 @@ from __future__ import annotations
 import uuid
 from typing import Any, cast
 
-from drf_spectacular.utils import extend_schema
+from drf_spectacular.utils import OpenApiParameter, extend_schema
+from rest_framework import serializers as drf_serializers
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.request import Request
 from rest_framework.response import Response
@@ -28,6 +29,7 @@ from config.problems import NotFoundError, PermissionDeniedError
 from identity.infra.jwt import DataForgeJWTAuthentication
 from registry.api import serializers
 from registry.application import services
+from registry.infra.diff import diff_range
 from tenancy.api.authentication import ApiKeyAuthentication, ApiKeyPrincipal
 from tenancy.api.middleware import arm_request_workspace
 
@@ -180,3 +182,69 @@ class SchemaVersionDetailView(APIView):
             "schema": record.json_schema,
         }
         return Response(serializers.VersionRecordSerializer(body).data)
+
+
+class SchemaDiffView(APIView):
+    """GET /schemas/{subject}/diff?from=a&to=b (api-spec §4.12 #66).
+
+    The computed added-fields diff between two registered versions (§5.3): ``added``
+    is ``properties(to) \\ properties(from)`` recursively (incl. fields added inside
+    an existing nested object), each ``{path, type, required:false}``. Under
+    ``BACKWARD_ADDITIVE`` ``removed``/``changed`` are empty by construction
+    (INV-REG-3); they exist in the shape for V-2. ``404`` if either version is
+    absent; ``400`` ``validation-error`` if ``from ≥ to`` (a diff is forward-only).
+    The diff is computed, never stored (§3.2). Auth is ``schemas:read`` (A-4).
+    """
+
+    authentication_classes: list[type] = [ApiKeyAuthentication, DataForgeJWTAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        operation_id="schemas_diff_retrieve",
+        parameters=[
+            OpenApiParameter("from", int, OpenApiParameter.QUERY, required=True),
+            OpenApiParameter("to", int, OpenApiParameter.QUERY, required=True),
+        ],
+        responses={200: serializers.SchemaDiffSerializer},
+    )
+    def get(self, request: Request, subject: str) -> Response:
+        workspace_id = _caller_workspace_id(request)
+        from_version = _diff_version_param(request, "from")
+        to_version = _diff_version_param(request, "to")
+        if from_version >= to_version:
+            raise drf_serializers.ValidationError(
+                {"from": "must be strictly less than 'to' (a diff is forward-only)"}
+            )
+
+        records = services.get_versions_in_range(
+            subject, from_version, to_version, workspace_id=workspace_id
+        )
+        if records is None:
+            raise NotFoundError()
+
+        # Aggregate per-step diffs so multi-step ranges report additions in
+        # version-introduction order (§7), deterministic across jsonb key ordering.
+        diff = diff_range([r.json_schema for r in records])
+        body = {
+            "subject": records[-1].subject.subject,
+            "from_version": from_version,
+            "to_version": to_version,
+            "added_fields": [f.to_dict() for f in diff.added_fields],
+            "removed_fields": [f.to_dict() for f in diff.removed_fields],
+            "changed_fields": [f.to_dict() for f in diff.changed_fields],
+        }
+        return Response(serializers.SchemaDiffSerializer(body).data)
+
+
+def _diff_version_param(request: Request, name: str) -> int:
+    """Parse a required positive-integer ``from``/``to`` query param (400 if bad)."""
+    raw = request.query_params.get(name)
+    if raw is None:
+        raise drf_serializers.ValidationError({name: "this query parameter is required"})
+    try:
+        value = int(raw)
+    except (ValueError, TypeError) as exc:
+        raise drf_serializers.ValidationError({name: "must be an integer"}) from exc
+    if value < 1:
+        raise drf_serializers.ValidationError({name: "must be a positive version number"})
+    return value

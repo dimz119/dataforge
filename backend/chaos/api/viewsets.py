@@ -32,7 +32,11 @@ from rest_framework.views import APIView
 
 from chaos.api import serializers
 from chaos.application import answer_key
-from chaos.application.validation import ChaosPolicyInvalid, validate_chaos_patch
+from chaos.application.validation import (
+    ChaosPolicyInvalid,
+    validate_chaos_patch,
+    validate_drift_arming,
+)
 from config.problems import (
     CursorInvalid,
     ManifestValidationFailed,
@@ -145,6 +149,19 @@ class StreamChaosView(APIView):
         patch = request.data if isinstance(request.data, dict) else {}
         try:
             validate_chaos_patch(dict(patch))
+            # CH-V07 (schema-registry §11 DR-3): if the PATCH leaves schema_drift
+            # enabled, the stream must have a subject with a registered next version
+            # above its effective version — else the mode could never draw a field.
+            # The effective map (a checkpoint + registry read) is computed lazily, only
+            # when drift ends up enabled, so a non-drift PATCH pays nothing for it.
+            merged = self._merged_chaos(stream, dict(patch))
+            drift = merged.get("schema_drift")
+            if isinstance(drift, dict) and drift.get("enabled"):
+                validate_drift_arming(
+                    resulting_config=merged,
+                    effective=self._effective_versions(stream),
+                    workspace_id=None,
+                )
         except ChaosPolicyInvalid as exc:
             raise ManifestValidationFailed(
                 "The chaos policy failed validation.", errors=exc.errors
@@ -154,6 +171,49 @@ class StreamChaosView(APIView):
         )
         body = serializers.ChaosPolicyResponseSerializer(self._serialize(stream)).data
         return Response(body, status=status.HTTP_200_OK)
+
+    @staticmethod
+    def _merged_chaos(stream: Stream, patch: dict[str, Any]) -> dict[str, Any]:
+        """The resulting chaos document = stored config + PATCH (mode-level merge, §3.5).
+
+        Mirrors :func:`streams.application.services.request_set_chaos_policy`'s merge so
+        the CH-V07 arming check sees exactly what would be stored (each present key
+        replaces wholesale; absent keys are untouched). Used only to decide whether
+        ``schema_drift`` ends up enabled — the actual write still goes through the
+        service.
+        """
+        merged = dict(stream.chaos_config or {})
+        merged.update(patch)
+        return merged
+
+    @staticmethod
+    def _effective_versions(stream: Stream) -> dict[str, int]:
+        """The stream's §10.2 effective ``{subject: version}`` map for the CH-V07 check.
+
+        Folds the materialized pin (PIN-R1/R2) with the highest applied upgrade target
+        (§10.2). After first start the materialized map lives in the checkpoint; before
+        it (a stream armed with drift at create / before its first tick) the map is
+        resolved on the fly with :func:`materialize_pins` against the pinned manifest —
+        so an explicit ``{subject: 1}`` pin with v2 registered is eligible immediately
+        (the E5 exercise arms drift up front), while a default-latest pin is correctly
+        ineligible (effective = latest, nothing above it).
+        """
+        from streams.application.schema_pins import (
+            applied_from_checkpoint,
+            effective_versions,
+            materialize_pins,
+            materialized_from_checkpoint,
+        )
+
+        materialized = materialized_from_checkpoint(stream.id)
+        if not materialized:
+            manifest = dict(stream.pinned_config or {})
+            if manifest:
+                materialized = materialize_pins(
+                    dict(stream.schema_version_pins or {}), manifest=manifest
+                )
+        applied = applied_from_checkpoint(stream.id)
+        return effective_versions(materialized, applied)
 
     def _authorize(self, request: Request, stream_id: uuid.UUID, *, write: bool) -> Stream:
         """Resolve + arm; foreign → 404, key needs streams:write/read else 403."""

@@ -66,7 +66,7 @@ from dataforge_engine.behavior import (
 from dataforge_engine.behavior.scheduler import TokenBucket
 from generation.infra.clock import SystemWallClock
 from runner import lifecycle
-from runner.checkpoint_store import CheckpointStore
+from runner.checkpoint_store import CheckpointStore, RestoredCheckpoint
 from runner.fencing import FencingError
 from streams.application import desired_state
 from streams.domain.models import RUN_PAUSED, RUN_STOPPED
@@ -119,6 +119,26 @@ def _config_sha256(merged_config: dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+class _DriftMenuView:
+    """The engine's ``registry_view`` port (§11, DR-1): subject → next-version menu.
+
+    A thin ``menu_for`` adapter over the desired-state ``registry_view`` snapshot
+    (``{subject: DriftMenuEntry}``). The entries already satisfy the engine's
+    ``DriftMenu`` protocol (``from_version`` / ``to_version`` / ``added_fields``), so
+    no per-entry conversion is needed — this only realises the ``menu_for`` lookup.
+    Returns ``None`` for a subject with no registered next version (ineligible — drift
+    can never invent a field, DR-3 / CH-V07).
+    """
+
+    __slots__ = ("_menu",)
+
+    def __init__(self, menu: dict[str, Any]) -> None:
+        self._menu = menu
+
+    def menu_for(self, subject: str) -> Any | None:
+        return self._menu.get(subject)
+
+
 class ShardWorker:
     """Drives one (stream, shard) through the §8.3 reconciliation tick.
 
@@ -161,6 +181,21 @@ class ShardWorker:
         self._recorder: Any | None = None  # chaos InjectionRecorder
         self._late_buffer: Any | None = None  # chaos LateArrivalBuffer
         self._chaos_subseed: bytes = b""  # HMAC(stream_seed, "chaos") (§4.1)
+        # The drift field menu (§11, DR-1): {subject: DriftMenuEntry} from the
+        # desired-state ``registry_view``, refreshed each poll. Wrapped per tick in a
+        # ``menu_for`` provider and handed to the engine as the ``registry_view`` port.
+        self._registry_view: dict[str, Any] = {}
+        # Schema evolution (schema-registry §10.1-10.2): the materialized PIN-R1/R2 map
+        # (resolved once at first start, then carried in the checkpoint unchanged on
+        # restart) and the highest applied upgrade target per subject (the cutover
+        # workstream P10-05/06 updates this). Both persist in the checkpoint ``runtime``
+        # side-car and feed the engine's per-event-type ``schema_versions`` override.
+        self._schema_pins: dict[str, int] = {}  # materialized {subject: version}
+        self._applied_upgrades: dict[str, int] = {}  # {subject: highest applied target}
+        # The desired schedule/effective signature the live IR was last compiled for. A
+        # change (a newly-armed/changed scheduled upgrade, or an applied one raising the
+        # effective map) triggers a recompile + ``Shard.retarget_ir`` (§10.4 step 1-2).
+        self._cutover_sig: str = ""
         self._speed_multiplier: float = 1.0
         # Pause/resume bookkeeping (T6/T8). ``_paused`` is the warm-hold flag: while
         # set, the worker idles (lease retained, emission halted, clock frozen). It is
@@ -220,25 +255,33 @@ class ShardWorker:
         self._workspace_id = str(desired.workspace_id)
         self._shard_count = max(1, desired.shard_count)
         self._config_sha256 = _config_sha256(desired.pinned_config)
-        ir = compile_manifest_cached(
-            desired.pinned_config,
-            config_sha256=self._config_sha256,
-            schema_versions={},
-        )
-        self._shard = self._build_shard(ir, desired)
-        self._ledger = self._build_ledger(desired)
+        # Schema evolution: the checkpoint store is needed before the IR compile so a
+        # takeover can restore the materialized pin map (resolved once, §10.1) before
+        # compiling the IR with the effective per-event-type schema_versions override.
         self._checkpoints = CheckpointStore(
             workspace_id=str(desired.workspace_id),
             stream_id=self._stream_id,
             shard_id=self._shard_id,
         )
+        restored = await self._checkpoints.load()
+        await self._init_schema_versions(desired, restored)
+        ir = compile_manifest_cached(
+            desired.pinned_config,
+            config_sha256=self._config_sha256,
+            schema_versions=self._engine_schema_versions(desired),
+        )
+        self._shard = self._build_shard(ir, desired)
+        # The live IR reflects the base effective map with no armed cutover — record that
+        # signature so the first tick only recompiles if a scheduled upgrade is armed
+        # (§10.4: steady state with no pending upgrade recompiles nothing).
+        self._cutover_sig = self._cutover_signature(desired, {})
+        self._ledger = self._build_ledger(desired)
         self._bucket = TokenBucket(
             rate_per_second=desired.target_tps / self._shard_count,
             now=self._wall.now(),
         )
         self._speed_multiplier = float(desired.speed_multiplier)
         self._build_chaos(desired)
-        restored = await self._checkpoints.load()
         if restored is not None:
             # §8.5 takeover: rehydrate pools/RNG/clock and resume the sequence.
             await self._checkpoints.restore_into(self._shard, restored)
@@ -249,16 +292,73 @@ class ShardWorker:
                 shard_id=self._shard_id,
                 checkpoint_seq=restored.checkpoint_seq,
                 last_sequence_no=restored.last_sequence_no,
+                schema_pins=self._schema_pins,
             )
         else:
-            # First start: seed head snapshots, append them BEFORE chaos (INV-GEN-5),
-            # publish them so consumers see the catalog, then begin the tick loop.
+            # First start (T1→T3): seed head snapshots, append them BEFORE chaos
+            # (INV-GEN-5), publish them so consumers see the catalog, then persist the
+            # FIRST checkpoint. The materialized pin (PIN-R1, resolved once above) rides
+            # that checkpoint's ``runtime`` side-car so restarts/failover continue it
+            # unchanged — "latest" is never re-resolved (§10.1). The checkpoint captures
+            # the seeded engine state so a takeover within the 30 s window is correct.
             head = _deterministic_emitted_at(self._shard.seed())
             if head:
                 await asyncio.to_thread(self._append_ledger, head)
                 self._publisher.publish(head)
                 await lifecycle.incr_emitted(self._redis, self._stream_id, len(head))
+            await self._checkpoint()
         self._last_checkpoint_at = time.monotonic()
+
+    async def _init_schema_versions(
+        self, desired: DesiredState, restored: RestoredCheckpoint | None
+    ) -> None:
+        """Resolve the materialized pin map (PIN-R1/R2) — restore it, or materialize once.
+
+        On takeover/restart the materialized map + applied-upgrade targets are restored
+        from the checkpoint ``runtime`` side-car (resolved exactly once per stream,
+        §10.1 — restarts never re-resolve "latest"). On first start (no checkpoint) the
+        map is materialized now from the pinned manifest's emitted subjects + the
+        explicit ``schema_version_pins`` overrides; the subsequent first-checkpoint
+        write (in ``_setup``) persists it. The DB read runs off the event loop.
+        """
+        if restored is not None:
+            runtime = restored.runtime or {}
+            self._schema_pins = {
+                str(k): int(v) for k, v in (runtime.get("schema_pins") or {}).items()
+            }
+            self._applied_upgrades = {
+                str(k): int(v) for k, v in (runtime.get("applied_upgrades") or {}).items()
+            }
+            return
+        from streams.application.schema_pins import materialize_pins
+
+        self._schema_pins = await asyncio.to_thread(
+            materialize_pins,
+            dict(desired.schema_version_pins or {}),
+            manifest=desired.pinned_config,
+        )
+        self._applied_upgrades = {}
+
+    def _effective_versions(self) -> dict[str, int]:
+        """The §10.2 effective ``{subject: version}`` = max(materialized pin, applied)."""
+        from streams.application.schema_pins import effective_versions
+
+        return effective_versions(self._schema_pins, self._applied_upgrades)
+
+    def _engine_schema_versions(self, desired: DesiredState) -> dict[str, int]:
+        """Re-key the effective map to the engine's ``{event_type: version}`` override."""
+        from streams.application.schema_pins import engine_schema_versions
+
+        return engine_schema_versions(
+            self._effective_versions(), manifest=desired.pinned_config
+        )
+
+    def _runtime_state(self) -> dict[str, Any]:
+        """The checkpoint ``runtime`` side-car: materialized pin + applied targets (§10.2)."""
+        return {
+            "schema_pins": dict(self._schema_pins),
+            "applied_upgrades": dict(self._applied_upgrades),
+        }
 
     def _build_shard(self, ir: ManifestIR, desired: DesiredState) -> Shard:
         """Build a *live*-mode Shard for this (stream, shard) from the pin."""
@@ -296,6 +396,8 @@ class ShardWorker:
 
         self._chaos = ChaosPipeline(resolve_policy(desired.chaos_config))
         self._chaos_subseed = chaos_subseed(int(desired.seed))
+        # The drift field menu the engine draws from (§11, DR-1) — refreshed each poll.
+        self._registry_view = dict(desired.registry_view)
         self._recorder = InjectionRecorder()
         self._late_buffer = LateArrivalBuffer(
             workspace_id=str(desired.workspace_id),
@@ -319,11 +421,209 @@ class ShardWorker:
         from chaos.application.services import resolve_policy
         from dataforge_engine.chaos import ChaosPipeline
 
+        # Refresh the drift menu every poll (DR-1) so a mid-stream upgrade rebuilds it
+        # automatically (DR-4): the desired-state read recomputes it against the
+        # current effective version. Cheap dict copy; independent of the chaos sha.
+        self._registry_view = dict(desired.registry_view)
         sha = _config_sha256(desired.chaos_config or {})
         if sha == self._chaos_config_sha:
             return
         self._chaos = ChaosPipeline(resolve_policy(desired.chaos_config))
         self._chaos_config_sha = sha
+
+    # -- schema cutover (schema-registry §10.4) ----------------------------------
+
+    async def _apply_schema_cutovers(self, desired: DesiredState) -> None:
+        """Pre-warm + arm scheduled upgrades, then record any the clock has crossed.
+
+        Runs each running tick AFTER the desired poll and BEFORE generate (§10.4):
+
+        1. **Pre-warm** every ``scheduled`` upgrade into an engine
+           :class:`~dataforge_engine.behavior.ir.SchemaCutover` from the desired
+           ``schema_upgrade_schedule`` + the effective map (the ``registry_view``
+           pre-warm, EM-5; one registry read off the event loop). When the resulting
+           overlay differs from the live IR's (a new/changed schedule, or an applied
+           upgrade raising the effective version), recompile the IR with the cutover
+           ``schema_versions`` + ``schema_cutovers`` and ``retarget_ir`` the live shard —
+           pools/heap/sequence/clock are shared by reference, so generation continues
+           with zero ``sequence_no`` gaps (the "no restart" cutover).
+        2. **Apply bookkeeping** for any pre-warmed cutover whose ``at`` the virtual
+           clock has now reached (``virtual_now ≥ at``): fold the target into the
+           effective map (``_applied_upgrades``), capture the first post-cutover
+           ``sequence_no`` (the next event the shard emits, ``sequence.last + 1``), and
+           write the ``applied`` transition + ``applied_at_wall`` back to the schedule
+           entry (audit ``schema_upgrade_applied``). The actual per-event version switch
+           is the interpreter's ``occurred_at`` gate, not this step — this only records
+           that the boundary has passed and rebuilds the drift menu next refresh (DR-4).
+        """
+        assert self._shard is not None
+        if self._shard.clock.is_backfill:
+            # Backfill cutover is handled inside the batch run (the clock has no live
+            # ``virtual_now``); the §10.4 backfill row is covered by the per-event gate
+            # over the simulated window. A live tick never runs in backfill mode.
+            return
+        now = self._wall.now()
+        virtual_now_us = self._shard.clock.virtual_now_us(now)
+        cutovers = await asyncio.to_thread(
+            self._pre_warm_cutovers, desired, virtual_now_us
+        )
+        self._maybe_retarget(desired, cutovers)
+        await self._record_crossed_cutovers(desired, cutovers, virtual_now_us, now)
+
+    def _pre_warm_cutovers(
+        self, desired: DesiredState, virtual_now_us: int
+    ) -> dict[str, Any]:
+        """Build the ``{event_type: SchemaCutover}`` overlay for the armed schedule (EM-5)."""
+        assert self._shard is not None
+        from streams.application.schema_cutover import pre_warm_cutovers
+
+        return pre_warm_cutovers(
+            manifest=desired.pinned_config,
+            effective=self._effective_versions(),
+            schedule=desired.schema_upgrade_schedule,
+            virtual_epoch_ms=self._shard.clock.virtual_epoch_ms,
+            virtual_now_offset_us=virtual_now_us,
+        )
+
+    def _maybe_retarget(
+        self, desired: DesiredState, cutovers: dict[str, Any]
+    ) -> None:
+        """Recompile + ``retarget_ir`` when the schema overlay changed (§10.4 step 1-2)."""
+        assert self._shard is not None
+        signature = self._cutover_signature(desired, cutovers)
+        if signature == self._cutover_sig:
+            return
+        ir = compile_manifest_cached(
+            desired.pinned_config,
+            config_sha256=self._config_sha256,
+            schema_versions=self._engine_schema_versions(desired),
+            schema_cutovers=cutovers or None,
+        )
+        self._shard.retarget_ir(ir)
+        self._cutover_sig = signature
+        logger.info(
+            "shard.schema_retargeted",
+            stream_id=self._stream_id,
+            shard_id=self._shard_id,
+            effective=self._effective_versions(),
+            armed=sorted(cutovers),
+        )
+
+    def _cutover_signature(
+        self, desired: DesiredState, cutovers: dict[str, Any]
+    ) -> str:
+        """A stable signature of the schema overlay the IR must reflect.
+
+        Folds the effective per-event-type map (so an applied upgrade forces a recompile
+        that bakes the new base version) with each armed cutover's gate + target + added
+        field names (the binding closures are not hashable, but the field names + target
+        + ``at`` fully discriminate a schedule change). Order-independent via sorting.
+        """
+        effective = sorted(self._engine_schema_versions(desired).items())
+        armed = sorted(
+            (
+                event_type,
+                cut.at_us,
+                cut.target_version,
+                tuple(name for name, _ in cut.added_bindings),
+            )
+            for event_type, cut in cutovers.items()
+        )
+        return repr((effective, armed))
+
+    async def _record_crossed_cutovers(
+        self,
+        desired: DesiredState,
+        cutovers: dict[str, Any],
+        virtual_now_us: int,
+        wall_now: Any,
+    ) -> None:
+        """Mark applied every armed cutover the virtual clock has crossed (§10.4 step 4)."""
+        assert self._shard is not None
+        event_to_subject = {
+            v: k for k, v in self._subject_event_types(desired).items()
+        }
+        for event_type, cut in cutovers.items():
+            if virtual_now_us < cut.at_us:
+                continue  # not yet — keep emitting the old version (cutover rule)
+            subject = event_to_subject.get(event_type)
+            if subject is None:
+                continue
+            if self._applied_upgrades.get(subject, 0) >= cut.target_version:
+                continue  # already folded into the effective map (restart/failover)
+            # The first post-cutover sequence_no per shard (§10.4 step 4): the next
+            # event the shard will emit this tick is the first whose occurred_at ≥ at.
+            applied_sequence_no = self._shard.sequence.last + 1
+            self._applied_upgrades[subject] = cut.target_version
+            await self._mark_applied(
+                desired=desired,
+                cutover=cut,
+                subject=subject,
+                applied_sequence_no=applied_sequence_no,
+                wall_now=wall_now,
+            )
+            # Refresh the signature so the recompile this same tick bakes the now-applied
+            # version as the base (the cutover entry drops out next pre-warm).
+            self._cutover_sig = ""
+
+    async def _mark_applied(
+        self,
+        *,
+        desired: DesiredState,
+        cutover: Any,
+        subject: str,
+        applied_sequence_no: int,
+        wall_now: Any,
+    ) -> None:
+        """Persist the ``applied`` schedule transition + heartbeat (§10.4 step 4)."""
+        upgrade_id = self._scheduled_upgrade_id(desired, subject)
+        if upgrade_id is None:
+            return
+        await asyncio.to_thread(
+            self._mark_applied_sync,
+            upgrade_id=upgrade_id,
+            applied_sequence_no=applied_sequence_no,
+            wall_now=wall_now,
+        )
+        logger.info(
+            "shard.schema_upgrade_applied",
+            stream_id=self._stream_id,
+            shard_id=self._shard_id,
+            subject=subject,
+            target_version=cutover.target_version,
+            applied_sequence_no=applied_sequence_no,
+        )
+
+    def _mark_applied_sync(
+        self, *, upgrade_id: str, applied_sequence_no: int, wall_now: Any
+    ) -> None:
+        from streams.application.schema_upgrades import mark_upgrade_applied
+
+        with self._armed_scope():
+            mark_upgrade_applied(
+                stream_id=self._stream_id,
+                upgrade_id=upgrade_id,
+                applied_at_wall=wall_now,
+                applied_sequence_no=applied_sequence_no,
+            )
+
+    def _scheduled_upgrade_id(
+        self, desired: DesiredState, subject: str
+    ) -> str | None:
+        """The ``upgrade_id`` of the subject's single ``scheduled`` entry (REG-U007)."""
+        for entry in desired.schema_upgrade_schedule or []:
+            if (
+                isinstance(entry, dict)
+                and entry.get("status") == "scheduled"
+                and str(entry.get("subject")) == subject
+            ):
+                return str(entry.get("upgrade_id"))
+        return None
+
+    def _subject_event_types(self, desired: DesiredState) -> dict[str, str]:
+        from streams.application.schema_pins import subject_to_event_type
+
+        return subject_to_event_type(desired.pinned_config)
 
     # -- the tick ----------------------------------------------------------------
 
@@ -374,6 +674,12 @@ class ShardWorker:
         # Live chaos config: rebuild the pipeline from the polled desired-state
         # document so toggles/rates apply at the next tick boundary (§3.5, ≤ 2 s).
         self._apply_chaos_config(desired)
+
+        # 3.5 schema cutover (schema-registry §10.4): AFTER the desired poll, BEFORE
+        #     generate — pre-warm a scheduled upgrade into the engine IR (the per-event
+        #     ``occurred_at`` gate does the atomic-between-events switch), then record
+        #     ``applied`` bookkeeping for any cutover the virtual clock has now crossed.
+        await self._apply_schema_cutovers(desired)
 
         # 4. generate (paced).
         out = await self._generate_tick()
@@ -477,6 +783,7 @@ class ShardWorker:
             chaos_subseed=self._chaos_subseed,
             recorder=cast(Any, self._recorder),
             late_buffer=cast(Any, self._late_buffer),
+            registry_view=_DriftMenuView(self._registry_view),
             virtual_clock=clock,
         )
 
@@ -528,6 +835,7 @@ class ShardWorker:
             fencing_token=self._fencing_token,
             checkpoint_seq=self._checkpoint_seq,
             config_sha256=self._config_sha256,
+            runtime=self._runtime_state(),
         )
         self._last_checkpoint_at = time.monotonic()
 

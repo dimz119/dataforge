@@ -108,11 +108,15 @@ class PoolTransaction:
         *,
         occurred_at: datetime,
         emitted_at: datetime,
+        occurred_at_us: int = 0,
     ) -> None:
         self._ir = ir
         self._id = identity
         self._occurred_at = occurred_at
         self._emitted_at = emitted_at
+        # The event's own virtual instant in µs — the schema-cutover gate (§10.4): an
+        # event at or after a pending cutover's ``at_us`` stamps the upgraded version.
+        self._occurred_at_us = occurred_at_us
         self._mutations: list[Mutation] = []
         self._business: _BusinessEvent | None = None
 
@@ -184,7 +188,7 @@ class PoolTransaction:
             event_type=biz.event_type,
             schema_ref=make_schema_ref(
                 self._id.scenario_slug, biz.event_type,
-                self._ir.schema_versions.get(biz.event_type, 1),
+                self._effective_version(biz.event_type),
             ),
             sequence_no=seq,
             partition_entity_type=biz.partition_entity_type,
@@ -203,6 +207,23 @@ class PoolTransaction:
             payload=biz.payload,
             df=make_canonical_df(),
         )
+
+    def _effective_version(self, event_type: str) -> int:
+        """The ``schema_ref.version`` this event carries (the §10.4 cutover rule).
+
+        A pending :class:`~dataforge_engine.behavior.ir.SchemaCutover` for the event
+        type whose ``at_us`` this event has reached (``occurred_at_us >= at_us``) wins:
+        the first event of the subject on/after ``at`` carries the new
+        ``target_version`` (and the matching added fields, applied in the interpreter),
+        every earlier event keeps the base ``schema_versions`` mapping (default 1). The
+        per-event gate is what makes one tick's straddling batch split cleanly across
+        the cutover and keeps the boundary identical across speed/pause/failover/backfill
+        (the gate is ``occurred_at``, INV-GEN-4 monotone per shard).
+        """
+        cutover = self._ir.schema_cutovers.get(event_type)
+        if cutover is not None and self._occurred_at_us >= cutover.at_us:
+            return cutover.target_version
+        return self._ir.schema_versions.get(event_type, 1)
 
     def _maybe_build_cdc(
         self, mutation: Mutation, sequence: SequenceCounter,

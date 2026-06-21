@@ -195,7 +195,7 @@ def _create_version(
     version: int,
     compat_checked_against: int | None,
     workspace_id: UUID | None,
-    definition_id: UUID,
+    definition_id: UUID | None,
     on_registered: OnRegistered | None,
 ) -> RegisteredVersion:
     SchemaVersion.objects.create(

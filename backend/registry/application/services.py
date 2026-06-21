@@ -86,6 +86,59 @@ def get_version(
     return qs.filter(version=number).first()
 
 
+def get_versions_in_range(
+    name: str, from_version: int, to_version: int, *, workspace_id: UUID | None
+) -> list[SchemaVersion] | None:
+    """The subject's versions in ``[from_version, to_version]`` (ascending).
+
+    Used by the #66 diff to aggregate per-step diffs in version-introduction order
+    (§7: "multi-step ranges aggregate the computed per-version diffs"). Returns
+    ``None`` if the subject is absent, or if either endpoint version is missing —
+    the caller maps that to a 404. A contiguous gapless chain is guaranteed by
+    INV-REG-2 (versions are monotonic from 1), so the range is always complete.
+    """
+    subject = _resolve_subject(name, workspace_id)
+    if subject is None:
+        return None
+    rows = list(
+        SchemaVersion.objects.filter(
+            subject=subject, version__gte=from_version, version__lte=to_version
+        ).order_by("version")
+    )
+    present = {r.version for r in rows}
+    if from_version not in present or to_version not in present:
+        return None
+    return rows
+
+
+def subjects_emitted_with_latest(
+    manifest: dict[str, Any], *, workspace_id: UUID | None
+) -> dict[str, int | None]:
+    """Every subject ``manifest`` emits → its latest registered version (or ``None``).
+
+    The materialization + validation seam for stream schema pins (schema-registry
+    §10.1). ``derive_subjects`` (the Flow-1 derivation) enumerates exactly the
+    subjects this manifest emits — business ``{slug}.{event_type}`` and CDC
+    ``{slug}.cdc.{entity}`` — which is the authoritative answer to "subjects the
+    pinned manifest emits" (PIN-R1/PIN-R3). Each subject resolves to its latest
+    registered version *at this moment* (workspace-first then global, including Flow 2
+    evolutions, §5.2); a subject the manifest declares but that has no registered
+    version yet maps to ``None`` (a manifest that has never been published — the
+    caller treats that as "no materialized pin"). Pure read; no write.
+    """
+    from registry.infra.derive import derive_subjects
+
+    latest_by_subject: dict[str, int | None] = {}
+    for derived in derive_subjects(manifest):
+        subject = _resolve_subject(derived.subject, workspace_id)
+        if subject is None:
+            latest_by_subject[derived.subject] = None
+            continue
+        versions = _versions_for(subject)
+        latest_by_subject[derived.subject] = versions[-1].version if versions else None
+    return latest_by_subject
+
+
 def manifest_version_for(schema_version: SchemaVersion) -> str | None:
     """The Flow-1 provenance: the semver of the manifest version that derived this.
 
@@ -118,3 +171,65 @@ def _manifest_semver(definition_id: UUID) -> str | None:
         return None
     row: Any = ManifestVersion.objects.filter(id=definition_id).only("version").first()
     return str(row.version) if row is not None else None
+
+
+@dataclass(frozen=True)
+class ScenarioContext:
+    """The Flow-2 registration context for a subject's scenario (schema-registry §5.2).
+
+    Carries the owning scenario's id (for the ``≤250 subjects`` cap and version
+    ownership), its tenancy (``None`` for a global/builtin scenario), and the
+    **latest published manifest** document — the binding-resolution context for the
+    REG-C007 check (every added ``from`` path must resolve against it).
+    """
+
+    scenario_id: UUID
+    workspace_id: UUID | None
+    latest_manifest: dict[str, Any]
+    latest_manifest_version: str
+
+
+def scenario_context_for_subject(subject_name: str) -> ScenarioContext | None:
+    """Resolve the global scenario + latest published manifest for ``subject``.
+
+    Flow 2 registers only platform-owned (global) subjects (§5.2), so the scenario
+    is resolved global-only (``workspace_id IS NULL``). The subject's scenario slug
+    is the leading dot-free segment (INV-REG-1). Returns ``None`` when the scenario
+    or any published manifest is absent — the command maps that to REG-C011-class
+    failures via the registration gate (a subject cannot exist without a manifest).
+    Reached through a lazy catalog seam (cross-app application↔application is allowed).
+    """
+    slug = subject_name.split(".", 1)[0]
+    try:
+        from catalog.domain.models import STATUS_PUBLISHED, ManifestVersion, Scenario
+    except ImportError:  # pragma: no cover - integrated build always has catalog
+        return None
+    scenario: Any = Scenario.objects.filter(slug=slug, workspace_id__isnull=True).first()
+    if scenario is None:
+        return None
+    published = list(
+        ManifestVersion.objects.filter(
+            scenario=scenario, status=STATUS_PUBLISHED, workspace_id__isnull=True
+        )
+    )
+    if not published:
+        return None
+    latest = max(published, key=lambda mv: _semver_key(str(mv.version)))
+    return ScenarioContext(
+        scenario_id=scenario.id,
+        workspace_id=None,
+        latest_manifest=dict(latest.manifest),
+        latest_manifest_version=str(latest.version),
+    )
+
+
+def _semver_key(version: str) -> tuple[int, ...]:
+    """Numeric sort key for a ``MAJOR.MINOR.PATCH`` semver (no pre-release in MVP)."""
+    parts = version.split(".")
+    key: list[int] = []
+    for part in parts:
+        try:
+            key.append(int(part))
+        except ValueError:  # pragma: no cover - SEMVER_PATTERN guarantees integers
+            key.append(0)
+    return tuple(key)

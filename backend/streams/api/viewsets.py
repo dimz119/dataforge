@@ -62,6 +62,8 @@ def _user(request: Request) -> Any:
 
 def _serialize_stream(stream: Stream) -> dict[str, Any]:
     """The §4.8 Stream resource dict (seed rendered as a string, PIN-1)."""
+    from streams.application.schema_pins import effective_versions_for_stream
+
     return {
         "stream_id": stream.id,
         "workspace_id": stream.workspace_id,
@@ -85,6 +87,11 @@ def _serialize_stream(stream: Stream) -> dict[str, Any]:
             # in Phase 6; null here (the clock is pinned, the runner advances it).
             "virtual_now": None,
         },
+        # The effective per-subject schema-version map (schema-registry §10.2,
+        # additive Phase 10 field): the materialized pin (from the checkpoint after
+        # first start) folded with the highest applied upgrade target; a preview from
+        # the pinned manifest before first start. {} when no subject resolves.
+        "schema_versions": effective_versions_for_stream(stream),
         "shard_count": stream.shard_count,
         "created_at": stream.created_at,
         "started_at": stream.first_started_at,
@@ -256,6 +263,7 @@ class StreamCollectionView(APIView):
             seed=data.get("seed"),
             target_tps=target_tps,
             chaos_config=dict(data.get("chaos") or {}),
+            schema_version_pins=dict(data.get("schema_version_pins") or {}),
             virtual_epoch=vclock.get("virtual_epoch"),
             speed_multiplier=vclock.get("speed_multiplier") or Decimal("1.0"),
             clock_mode="live",  # v1 live mode only (backfill is the datasets resource)
@@ -269,6 +277,8 @@ class StreamCollectionView(APIView):
             raise ConflictError(str(exc)) from exc
         except services.StreamCreationForbidden as exc:
             raise PermissionDeniedError(str(exc)) from exc
+        # PinValidationFailed (PIN-R3) is a ProblemException → rendered directly by the
+        # global handler as 422 validation-error with the errors[] extension; no catch.
         response = _response(stream, status_code=status.HTTP_201_CREATED)
         response["Location"] = f"/api/v1/streams/{stream.id}"
         return response
@@ -438,6 +448,164 @@ class StreamStatsView(APIView):
         body = build_stream_stats(workspace_id=str(stream.workspace_id), facts=facts)
         return Response(
             serializers.StreamStatsResponseSerializer(body).data, status=status.HTTP_200_OK
+        )
+
+
+def _serialize_upgrade(stream_id: uuid.UUID, entry: dict[str, Any]) -> dict[str, Any]:
+    """The §4.8.4 schema-upgrade resource dict from a persisted jsonb entry.
+
+    The entry is the storage shape (streams.application.schema_upgrades); the wire
+    resource adds ``stream_id`` and surfaces the lifecycle members. Optional members
+    (``applied_at_wall``/``applied_sequence_no``/``cancelled_at``) are ``None`` until
+    the runner cutover (or the cancel path) writes them.
+    """
+    return {
+        "upgrade_id": entry["upgrade_id"],
+        "stream_id": stream_id,
+        "subject": entry["subject"],
+        "target_version": entry["target_version"],
+        "at": entry.get("at"),
+        "status": entry["status"],
+        "created_at": entry["created_at"],
+        "applied_at_wall": entry.get("applied_at_wall"),
+        "applied_sequence_no": entry.get("applied_sequence_no"),
+        "cancelled_at": entry.get("cancelled_at"),
+    }
+
+
+class StreamSchemaUpgradeCollectionView(APIView):
+    """POST | GET /streams/{stream_id}/schema-upgrades (api-spec §4.8.4 #50-51).
+
+    POST schedules a mid-stream additive evolution (REG-U001..U007 validation →
+    409 ``conflict`` with the ``errors[]`` extension on failure); ``streams:write``.
+    Idempotency-Key (I-1): a repeat with the same key returns the already-scheduled
+    entry (still 201, no duplicate). GET lists every entry
+    (``scheduled``/``applied``/``cancelled``, the cancelled retained); ``streams:read``.
+    """
+
+    authentication_classes: list[type] = [ApiKeyAuthentication, DataForgeJWTAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        operation_id="streams_schema_upgrades_list",
+        responses={
+            200: page_envelope(
+                "StreamSchemaUpgradePage", serializers.SchemaUpgradeResponseSerializer
+            )
+        },
+    )
+    def get(self, request: Request, stream_id: str) -> Response:
+        from streams.application import schema_upgrades
+
+        stream = _resolve_stream_for_principal(request, _uuid(stream_id), write=False)
+        entries = schema_upgrades.list_upgrades(stream)
+        data = [
+            serializers.SchemaUpgradeResponseSerializer(
+                _serialize_upgrade(stream.id, e)
+            ).data
+            for e in entries
+        ]
+        return Response({"data": data, "next_cursor": None})
+
+    @extend_schema(
+        operation_id="streams_schema_upgrades_create",
+        request=serializers.SchemaUpgradeCreateSerializer,
+        responses={201: serializers.SchemaUpgradeResponseSerializer},
+    )
+    def post(self, request: Request, stream_id: str) -> Response:
+        from streams.application import schema_upgrades
+
+        stream = _resolve_stream_for_principal(request, _uuid(stream_id), write=True)
+        serializer = serializers.SchemaUpgradeCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = dict(serializer.validated_data)
+        idempotency_key = request.headers.get("Idempotency-Key")
+        try:
+            result = schema_upgrades.schedule_upgrade(
+                stream=stream,
+                subject_name=str(data["subject"]),
+                target_version=int(data["target_version"]),
+                at=data.get("at"),
+                actor=request.user,
+                idempotency_key=idempotency_key,
+            )
+        except schema_upgrades.UpgradeValidationFailed as exc:
+            raise ConflictError(
+                "The schema upgrade conflicts with the stream's current state.",
+                extensions={"errors": [e.to_dict() for e in exc.errors]},
+            ) from exc
+        body = serializers.SchemaUpgradeResponseSerializer(
+            _serialize_upgrade(stream.id, result.entry)
+        ).data
+        return Response(body, status=status.HTTP_201_CREATED)
+
+
+class StreamSchemaUpgradeDetailView(APIView):
+    """DELETE /streams/{stream_id}/schema-upgrades/{upgrade_id} (api-spec §4.8.4 #52).
+
+    Cancels a ``scheduled`` entry (→ 204); a non-``scheduled`` entry → 409
+    ``invalid-state-transition``; an unknown id → 404. The cancelled entry is retained
+    in the list (irreversible history is the audit posture, §10.3). ``streams:write``.
+    """
+
+    authentication_classes: list[type] = [ApiKeyAuthentication, DataForgeJWTAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        operation_id="streams_schema_upgrades_cancel",
+        request=None,
+        responses={204: None},
+    )
+    def delete(self, request: Request, stream_id: str, upgrade_id: str) -> Response:
+        from streams.application import schema_upgrades
+
+        stream = _resolve_stream_for_principal(request, _uuid(stream_id), write=True)
+        try:
+            schema_upgrades.cancel_upgrade(
+                stream=stream, upgrade_id=str(_uuid(upgrade_id)), actor=request.user
+            )
+        except schema_upgrades.UpgradeNotFound as exc:
+            raise NotFoundError() from exc
+        except schema_upgrades.UpgradeNotCancellable as exc:
+            raise InvalidStateTransition(
+                "Only a scheduled upgrade can be cancelled."
+            ) from exc
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class StreamSchemaVersionsView(APIView):
+    """GET /streams/{stream_id}/schema-versions (schema-registry §10.2; #?).
+
+    The per-stream effective schema-version projection ``{effective, pending,
+    applied}``: ``effective`` the §10.2 ``max(materialized pin, highest applied
+    upgrade target)`` map per subject (the materialized pin lives in the checkpoint
+    after first start; a preview from the pinned manifest before it); ``pending`` the
+    ``scheduled`` upgrade entries awaiting their simulated-time cutover; ``applied``
+    the applied entries (with ``applied_at_wall``/``applied_sequence_no``). Cancelled
+    entries are surfaced only on the upgrade-list endpoint. ``streams:read``; a
+    foreign-workspace credential masks to 404 (W-1/W-3) via the shared resolver.
+    """
+
+    authentication_classes: list[type] = [ApiKeyAuthentication, DataForgeJWTAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        operation_id="streams_schema_versions",
+        responses={200: serializers.StreamSchemaVersionsResponseSerializer},
+    )
+    def get(self, request: Request, stream_id: str) -> Response:
+        from streams.application.schema_pins import schema_versions_view_for_stream
+
+        stream = _resolve_stream_for_principal(request, _uuid(stream_id), write=False)
+        view = schema_versions_view_for_stream(stream)
+        body = {
+            "effective": view["effective"],
+            "pending": [_serialize_upgrade(stream.id, e) for e in view["pending"]],
+            "applied": [_serialize_upgrade(stream.id, e) for e in view["applied"]],
+        }
+        return Response(
+            serializers.StreamSchemaVersionsResponseSerializer(body).data,
+            status=status.HTTP_200_OK,
         )
 
 

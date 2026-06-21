@@ -45,3 +45,30 @@ class VersionRecordSerializer(serializers.Serializer[dict[str, Any]]):
     manifest_version = serializers.CharField(allow_null=True)
     registered_at = serializers.DateTimeField()
     schema = serializers.DictField()
+
+
+class AddedFieldSerializer(serializers.Serializer[dict[str, Any]]):
+    """One added property in the computed diff (#66)."""
+
+    path = serializers.CharField()  # JSON Pointer into the *to* document
+    type = serializers.CharField()
+    # ``required`` shadows ``Field.required``; keep it declared as a field (the wire
+    # key must be ``required``) and silence the base-attr type clash (the same
+    # ``# type: ignore[assignment]`` pattern catalog/delivery use for ``errors``/``data``).
+    required = serializers.BooleanField()  # type: ignore[assignment]
+
+
+class SchemaDiffSerializer(serializers.Serializer[dict[str, Any]]):
+    """The computed version-to-version diff (#66).
+
+    Under ``BACKWARD_ADDITIVE`` (the only MVP mode) ``removed_fields`` /
+    ``changed_fields`` are always empty by construction (INV-REG-3); they are in the
+    shape so the contract survives a future compatibility-mode addition (V-2).
+    """
+
+    subject = serializers.CharField()
+    from_version = serializers.IntegerField()
+    to_version = serializers.IntegerField()
+    added_fields = AddedFieldSerializer(many=True)
+    removed_fields = AddedFieldSerializer(many=True)
+    changed_fields = AddedFieldSerializer(many=True)

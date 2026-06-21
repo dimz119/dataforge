@@ -32,7 +32,15 @@ if TYPE_CHECKING:
     from dataforge_engine.seeds import SeedTree
 
     from .clock import VirtualClock
-    from .ir import Effect, EntityIR, EventTypeIR, ManifestIR, State, Transition
+    from .ir import (
+        Effect,
+        EntityIR,
+        EventTypeIR,
+        ManifestIR,
+        State,
+        Transition,
+        ValueSource,
+    )
     from .observer import Observer
     from .pools import EntityPools, PooledEntity
     from .rng import Cursor
@@ -66,6 +74,17 @@ class Interpreter:
         # runner / golden hosts: the hot path then never touches it (BE-T1, no
         # cost, no behavior change). The L3 host attaches a recorder.
         self.observer: Observer | None = None
+
+    def set_ir(self, ir: ManifestIR) -> None:
+        """Adopt a schema-upgrade-extended IR mid-stream (schema-registry §10.4).
+
+        Driven by :meth:`Shard.retarget_ir`: the manifest body is identical, only the
+        schema-evolution overlay (``schema_versions`` / ``schema_cutovers`` /
+        ``added_field_bindings``) differs, so every live traversal, the heap, and the
+        sequence counter stay valid — the in-flight funnels continue, and the next
+        emit stamps the upgraded version + appends the added fields per the cutover gate.
+        """
+        self._ir = ir
 
     # -- the §2.3 algorithm -------------------------------------------------
 
@@ -130,7 +149,10 @@ class Interpreter:
         v: int, occurred_at: datetime, emitted_at: datetime,
     ) -> list[InternalEnvelope]:
         traversal.bump()
-        tx = PoolTransaction(self._ir, self._id, occurred_at=occurred_at, emitted_at=emitted_at)
+        tx = PoolTransaction(
+            self._ir, self._id, occurred_at=occurred_at, emitted_at=emitted_at,
+            occurred_at_us=v,
+        )
         ctx = self._make_context(traversal, occurred_at, v)
         try:
             self._run_effects(transition.effects, ctx, traversal, tx, occurred_at)
@@ -139,7 +161,7 @@ class Interpreter:
             return self._apply_remainder(traversal, state, v, occurred_at, emitted_at)
 
         if transition.emit is not None:
-            self._stamp_business(transition.emit, traversal, ctx, tx, occurred_at)
+            self._stamp_business(transition.emit, traversal, ctx, tx, occurred_at, v)
 
         batch = tx.commit(self._seq)
         if batch:
@@ -277,12 +299,12 @@ class Interpreter:
 
     def _stamp_business(
         self, event_type_name: str, traversal: Traversal, ctx: BindingContext,
-        tx: PoolTransaction, occurred_at: datetime,
+        tx: PoolTransaction, occurred_at: datetime, occurred_at_us: int,
     ) -> None:
         et = self._ir.event_types[event_type_name]
         event_id = self._mint_event_id(traversal, occurred_at)
         causation_id = traversal.last_event_id
-        payload = self._build_payload(et, ctx, traversal)
+        payload = self._build_payload(et, ctx, traversal, occurred_at_us)
         part_type, part_record = ctx.resolve_entity_ref(et.partition_by)
         if traversal.correlation_id == "":
             traversal.correlation_id = event_id  # chain root (C-1)
@@ -297,7 +319,8 @@ class Interpreter:
         )
 
     def _build_payload(
-        self, et: EventTypeIR, ctx: BindingContext, traversal: Traversal
+        self, et: EventTypeIR, ctx: BindingContext, traversal: Traversal,
+        occurred_at_us: int,
     ) -> dict[str, JSONValue]:
         cursor = traversal.rng.values
         payload: dict[str, JSONValue] = {}
@@ -307,9 +330,41 @@ class Interpreter:
                 source, ctx, cursor, self._pools, siblings=payload, ref_keys=ref_keys
             )
             payload[fname] = value
+        # Mid-stream schema-upgrade resolver extension (schema-registry §10.4 step 2):
+        # after the manifest's own fields, append the upgrade chain's added fields.
+        # ``from`` paths resolve against the same emission binding context (R-EVT-3);
+        # ``generated`` bindings draw from the same ``values`` cursor (the values
+        # sub-seed, INV-GEN-3) — appended *after* the manifest fields so existing
+        # streams (no cutover) and pre-cutover events draw an identical cursor and stay
+        # byte-stable (the v1→v2/v3 exercise uses pure ``from`` bindings, no draw).
+        added = self._added_bindings_for(et.name, occurred_at_us)
+        if added:
+            for fname, source in added:
+                payload[fname] = resolve_value_source(
+                    source, ctx, cursor, self._pools, siblings=payload, ref_keys=ref_keys
+                )
         payload.pop("__now__", None)
         payload.pop("__virtual_epoch_ms__", None)
         return payload
+
+    def _added_bindings_for(
+        self, event_type: str, occurred_at_us: int
+    ) -> tuple[tuple[str, ValueSource], ...]:
+        """The added-field chain this event carries (the §10.4 cutover rule).
+
+        A pending :class:`~dataforge_engine.behavior.ir.SchemaCutover` whose ``at_us``
+        this event has reached (``occurred_at_us >= at_us``) contributes its
+        ``added_bindings``; the version bump in :class:`PoolTransaction` keys on the
+        same gate, so ``schema_ref.version`` and the added fields move together (the
+        first event of the subject on/after ``at`` is the first to carry both). A
+        pre-cutover event (or a stream with no cutover) falls back to the static
+        ``added_field_bindings`` — empty for the v1→v2/v3 exercise until the upgrade is
+        scheduled — so it stays byte-stable.
+        """
+        cutover = self._ir.schema_cutovers.get(event_type)
+        if cutover is not None and occurred_at_us >= cutover.at_us:
+            return cutover.added_bindings
+        return self._ir.added_field_bindings.get(event_type, ())
 
     def _build_entity_refs(
         self, part_type: str, part_record: PooledEntity,
@@ -441,11 +496,14 @@ class Interpreter:
             return []
         edge = state.timeout
         traversal.bump()
-        tx = PoolTransaction(self._ir, self._id, occurred_at=occurred_at, emitted_at=emitted_at)
+        tx = PoolTransaction(
+            self._ir, self._id, occurred_at=occurred_at, emitted_at=emitted_at,
+            occurred_at_us=v,
+        )
         ctx = self._make_context(traversal, occurred_at, v)
         self._run_effects(edge.effects, ctx, traversal, tx, occurred_at)
         if edge.emit is not None:
-            self._stamp_business(edge.emit, traversal, ctx, tx, occurred_at)
+            self._stamp_business(edge.emit, traversal, ctx, tx, occurred_at, v)
         batch = tx.commit(self._seq)
         if batch:
             traversal.last_event_id = batch[0]["event_id"]

@@ -73,12 +73,23 @@ def _uuid_param(value: str) -> str:
 
 @dataclass(frozen=True)
 class RestoredCheckpoint:
-    """A loaded checkpoint row (the takeover input, §8.5). ``None`` → first start."""
+    """A loaded checkpoint row (the takeover input, §8.5). ``None`` → first start.
+
+    ``runtime`` is the schema-evolution side-car the runner nests alongside the
+    engine codec blob (schema-registry §10.2): the materialized pin map
+    (``schema_pins``) and the highest-applied-upgrade target per subject
+    (``applied_upgrades``). It survives pause/resume, stop/restart, and failover with
+    the same guarantee class as the engine state (INV-CHA-5). The engine codec
+    ignores it (``restore_checkpoint`` reads only its own keys), so it rides the same
+    fenced write without touching engine purity. ``{}`` on a checkpoint written
+    before this side-car existed (backward-compatible read).
+    """
 
     checkpoint_seq: int
     fencing_token: int
     last_sequence_no: int
     blob: dict[str, Any]
+    runtime: dict[str, Any]
 
 
 class CheckpointStore:
@@ -118,6 +129,7 @@ class CheckpointStore:
         fencing_token: int,
         checkpoint_seq: int,
         config_sha256: str = "",
+        runtime: Mapping[str, Any] | None = None,
     ) -> None:
         """Persist snapshots then the fenced checkpoint row. Raise if fenced.
 
@@ -125,10 +137,17 @@ class CheckpointStore:
         the upcoming ``checkpoint_seq``), then the checkpoint row last as the commit
         marker. The checkpoint write is the §8.2 conditional write — a stale token
         raises :class:`FencingError`.
+
+        ``runtime`` is the schema-evolution side-car (schema-registry §10.2): the
+        materialized pin map + applied-upgrade targets, nested under the ``runtime``
+        key of the persisted blob so it survives every lifecycle transition with the
+        engine state. The engine codec ignores it, keeping engine purity intact.
         """
         blob = encode_checkpoint(
             shard, checkpoint_seq=checkpoint_seq, config_sha256=config_sha256
         )
+        if runtime:
+            blob["runtime"] = dict(runtime)
         blob_json = json.dumps(
             blob, separators=(",", ":"), sort_keys=True, default=_json_default
         )
@@ -300,11 +319,14 @@ class CheckpointStore:
         if row is None:
             return None
         blob_json = decompress(bytes(row.state)).decode("utf-8")
+        blob = json.loads(blob_json)
+        runtime = blob.get("runtime")
         return RestoredCheckpoint(
             checkpoint_seq=int(row.checkpoint_seq),
             fencing_token=int(row.fencing_token),
             last_sequence_no=int(row.last_sequence_no),
-            blob=json.loads(blob_json),
+            blob=blob,
+            runtime=runtime if isinstance(runtime, dict) else {},
         )
 
     async def restore_into(self, shard: Shard, restored: RestoredCheckpoint) -> None:

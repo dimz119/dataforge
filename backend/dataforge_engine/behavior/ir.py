@@ -74,6 +74,24 @@ def _compile_generator(gspec: dict[str, Any]) -> GeneratorFn:
     return build_generator(name, params)
 
 
+@dataclass(frozen=True)
+class SchemaCutover:
+    """A scheduled mid-stream schema upgrade, gated on ``occurred_at`` (§10.4).
+
+    ``at_us`` is the schedule's ``at`` in virtual µs (the simulated/``occurred_at``
+    domain). ``target_version`` is the upgrade target; ``added_bindings`` is the union
+    chain of added fields' ``(field_name, ValueSource)`` in version-introduction order
+    (1→2 then 2→3 for a skip, §10.3). An event whose ``occurred_at`` (in µs) is
+    ``>= at_us`` is on/after the cutover; the interpreter then stamps ``target_version``
+    and appends ``added_bindings``. Pure value object — the runner host compiles it from
+    the pre-warmed ``registry_view`` and the schedule entry.
+    """
+
+    at_us: int
+    target_version: int
+    added_bindings: tuple[tuple[str, ValueSource], ...]
+
+
 # ---------------------------------------------------------------------------
 # Guards (compiled preconditions; behavior-engine §5).
 # ---------------------------------------------------------------------------
@@ -316,6 +334,38 @@ class ManifestIR:
     one_to_one_seed_fks: dict[str, dict[str, tuple[str, str]]] = field(default_factory=dict)
     seeding: dict[str, int] = field(default_factory=dict)
     schema_versions: dict[str, int] = field(default_factory=dict)
+    # Mid-stream schema-upgrade resolver extension (schema-registry §10.4 step 2).
+    # Per *business* event type, the ordered added-field bindings of the version
+    # chain the stream has cut over to: ``event_type → ((field_name, ValueSource), …)``
+    # in version-introduction order (1→2 then 2→3 for a skip). Empty by default — a
+    # stream at its pinned version stamps and emits exactly its v1 payload. The
+    # interpreter appends these resolved fields to the canonical payload after the
+    # manifest's own fields (EM-2: the generator emits every field the *effective*
+    # version declares), and ``schema_versions`` carries the matching bumped version
+    # so ``schema_ref.version`` and the added fields move together (the cutover rule).
+    # Data-driven and pure: the host (runner) supplies the bindings compiled from the
+    # registry version documents' ``x-df-binding`` annotations; the engine never reads
+    # the registry. ``from`` paths resolve against the same emission binding context
+    # the manifest's own fields use (R-EVT-3); ``generated`` bindings draw from the
+    # ``values`` sub-seed (deterministic, INV-GEN-3).
+    added_field_bindings: dict[str, tuple[tuple[str, ValueSource], ...]] = field(
+        default_factory=dict
+    )
+    # Mid-stream scheduled cutover (schema-registry §10.4 cutover rule). Per *business*
+    # event type, the pending upgrade's pre-warmed target version + union chain of added
+    # fields, gated on the event's own ``occurred_at`` (the simulated/``occurred_at``
+    # domain, INV-GEN-4). ``at_us`` is the schedule's ``at`` in virtual µs. The cutover
+    # rule (§10.4 step 3): the first event of the subject whose ``occurred_at ≥ at``
+    # carries ``target_version`` + the added fields; every earlier event keeps the base
+    # version (``schema_versions``) and emits no added field. Because the gate is
+    # per-event on ``occurred_at`` — not per-tick on wall time — one tick's batch may
+    # straddle ``at`` (each event decided on its own instant), the cutover is
+    # replay-identical at any ``speed_multiplier``, lands at the simulated day-10
+    # boundary inside a 30-day backfill window, and (keying on ``occurred_at`` not on
+    # when the runner noticed) fires for the right events after a failover gap. Empty by
+    # default; the runner supplies one entry per pending upgrade from the pre-warmed
+    # ``registry_view`` (EM-5). Pure/data-driven: the engine never reads the registry.
+    schema_cutovers: dict[str, SchemaCutover] = field(default_factory=dict)
     # The renormalized diurnal x weekly arrival-rate curve (§3.4). Flat 1.0 when the
     # manifest declares no `intensity` section — so it never changes average TPS.
     intensity: IntensityCurve = field(default_factory=lambda: compile_intensity(None))
@@ -473,9 +523,24 @@ def _phase8_features_enabled(version: str) -> bool:
 
 
 def compile_manifest(
-    document: dict[str, Any], *, schema_versions: dict[str, int] | None = None
+    document: dict[str, Any],
+    *,
+    schema_versions: dict[str, int] | None = None,
+    added_field_bindings: dict[str, tuple[tuple[str, ValueSource], ...]] | None = None,
+    schema_cutovers: dict[str, SchemaCutover] | None = None,
 ) -> ManifestIR:
-    """Compile a Layer-1/2-valid manifest document into an executable IR."""
+    """Compile a Layer-1/2-valid manifest document into an executable IR.
+
+    ``schema_versions`` (event_type → version int) overrides the ``schema_ref.version``
+    the transaction stamps (default 1). ``added_field_bindings`` (event_type →
+    ordered ``(field, ValueSource)``) extends each business event type's payload
+    resolver with an *already-effective* version's chain of added fields. A
+    ``schema_cutovers`` entry (event_type → :class:`SchemaCutover`) instead carries a
+    *pending* mid-stream upgrade gated on ``occurred_at`` (schema-registry §10.4): the
+    interpreter applies its ``target_version`` + ``added_bindings`` only to events at or
+    after the cutover instant. All three are data-driven so the runner can supply a
+    cutover-extended IR without the engine reading the registry.
+    """
     view = ManifestView(document)
     machines = {n: _compile_machine(n, m) for n, m in view.state_machines.items()}
 
@@ -533,6 +598,8 @@ def compile_manifest(
         one_to_one_seed_fks=one_to_one_seed_fks,
         seeding=seeding,
         schema_versions=dict(schema_versions or {}),
+        added_field_bindings=dict(added_field_bindings or {}),
+        schema_cutovers=dict(schema_cutovers or {}),
     )
 
 
@@ -549,13 +616,29 @@ def compile_manifest_cached(
     *,
     config_sha256: str = "",
     schema_versions: dict[str, int] | None = None,
+    schema_cutovers: dict[str, SchemaCutover] | None = None,
 ) -> ManifestIR:
     """LRU-cached :func:`compile_manifest`, keyed ``slug:version:config_sha256``.
 
     Per-stream merged config can change probabilities/dwells, so the key includes
     ``config_sha256``; with the default empty sha (golden/dry-run paths that pass
     the pinned document) the key reduces to ``slug:version``.
+
+    The schema-upgrade extensions (``schema_versions`` with a non-default mapping, or a
+    ``schema_cutovers`` map) are *per-stream dynamic state* — they change when an upgrade
+    is scheduled/applied and carry un-hashable bound ``ValueSource`` closures (§10.4),
+    so they are **not** part of the cache key; supplying either bypasses the LRU and
+    compiles a fresh IR. The base (un-extended) compile stays cached, which is the
+    common steady-state path: a stream with no pending/applied cutover recompiles
+    nothing (EM-1 "cache hit in practice" for the manifest body), and the runner only
+    rebuilds when its desired ``registry_view``/schedule changes.
     """
+    if schema_cutovers or schema_versions:
+        return compile_manifest(
+            document,
+            schema_versions=schema_versions,
+            schema_cutovers=schema_cutovers,
+        )
     view = ManifestView(document)
     key = f"{view.slug}:{view.metadata.get('version', '')}:{config_sha256}"
     cached = _CACHE.get(key)
