@@ -4,8 +4,9 @@ import { authPublicOnlyRoutes, authTokenRoutes } from '../features/auth';
 import { apikeysRoutes } from '../features/apikeys';
 import { dashboardRoutes } from '../features/dashboard';
 import { monitoringRoutes } from '../features/monitoring';
+import { chaosTabRoutes } from '../features/chaos';
 import { scenariosRoutes } from '../features/scenarios';
-import { streamsRoutes } from '../features/streams';
+import { buildStreamsRoutes } from '../features/streams';
 import { workspacesAdminRoutes, workspacesAuthRoutes } from '../features/workspaces';
 import { NotFoundPage } from '../shared/ui/NotFoundPage';
 import { PublicOnly } from './guards/PublicOnly';
@@ -37,7 +38,9 @@ export const routes: RouteObject[] = [
             children: [
               ...dashboardRoutes,
               ...scenariosRoutes,
-              ...streamsRoutes,
+              // Phase 9: the chaos + answer-key tabs are nested into the stream-detail
+              // layout here (the app composes cross-feature routes; IMP-2).
+              ...buildStreamsRoutes(chaosTabRoutes),
               ...apikeysRoutes,
               ...monitoringRoutes,
               { element: <RequireAdmin />, children: [...workspacesAdminRoutes] },

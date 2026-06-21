@@ -4,7 +4,7 @@
  * control-panel components, and the data layer. The stream LIST + monitoring overview
  * are owned by features/monitoring (§9.7).
  */
-export { streamsRoutes } from './routes';
+export { streamsRoutes, buildStreamsRoutes } from './routes';
 
 // The control-panel state machine (the normative §9.5 button-enablement matrix).
 export {

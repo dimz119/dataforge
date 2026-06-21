@@ -52,3 +52,9 @@ export type StreamResponse = Schemas['StreamResponse'];
 export type StreamCreate = Schemas['StreamCreate'];
 export type StreamStatsResponse = Schemas['StreamStatsResponse'];
 export type EventsPage = Schemas['EventsPage'];
+
+// --- Chaos & answer key (Phase 9) ---
+export type ChaosPolicyResponse = Schemas['ChaosPolicyResponse'];
+export type AnswerKeySummary = Schemas['AnswerKeySummary'];
+export type AnswerKeyInjection = Schemas['AnswerKeyInjection'];
+export type AnswerKeyInjectionsPage = Schemas['AnswerKeyInjectionsPage'];
