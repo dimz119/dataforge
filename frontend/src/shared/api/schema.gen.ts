@@ -1430,6 +1430,10 @@ export interface components {
       removed_fields: components['schemas']['AddedField'][];
       changed_fields: components['schemas']['AddedField'][];
     };
+    SchemaSubjectPage: {
+      data: components['schemas']['SubjectSummary'][];
+      next_cursor: string | null;
+    };
     /**
      * @description ``POST /streams/{id}/schema-upgrades`` body (api-spec §4.8.4 / schema-registry §10.3).
      *
@@ -1472,6 +1476,10 @@ export interface components {
       applied_sequence_no?: number | null;
       /** Format: date-time */
       cancelled_at?: string | null;
+    };
+    SchemaVersionPage: {
+      data: components['schemas']['VersionProvenance'][];
+      next_cursor: string | null;
     };
     /**
      * @description * `events:read` - events:read
@@ -2283,7 +2291,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['SubjectSummary'][];
+          'application/json': components['schemas']['SchemaSubjectPage'];
         };
       };
     };
@@ -2349,7 +2357,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['VersionProvenance'][];
+          'application/json': components['schemas']['SchemaVersionPage'];
         };
       };
     };

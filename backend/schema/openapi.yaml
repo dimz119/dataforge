@@ -530,9 +530,7 @@ paths:
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/SubjectSummary'
+                $ref: '#/components/schemas/SchemaSubjectPage'
           description: ''
   /api/v1/schemas/{subject}:
     get:
@@ -617,9 +615,7 @@ paths:
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/VersionProvenance'
+                $ref: '#/components/schemas/SchemaVersionPage'
           description: ''
   /api/v1/schemas/{subject}/versions/{schema_version}:
     get:
@@ -2731,6 +2727,19 @@ components:
       - removed_fields
       - subject
       - to_version
+    SchemaSubjectPage:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/SubjectSummary'
+        next_cursor:
+          type: string
+          nullable: true
+      required:
+      - data
+      - next_cursor
     SchemaUpgradeCreate:
       type: object
       description: |-
@@ -2806,6 +2815,19 @@ components:
       - subject
       - target_version
       - upgrade_id
+    SchemaVersionPage:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/VersionProvenance'
+        next_cursor:
+          type: string
+          nullable: true
+      required:
+      - data
+      - next_cursor
     ScopesEnum:
       enum:
       - events:read

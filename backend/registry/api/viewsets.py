@@ -26,6 +26,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from config.problems import NotFoundError, PermissionDeniedError
+from config.schema import page_envelope
 from identity.infra.jwt import DataForgeJWTAuthentication
 from registry.api import serializers
 from registry.application import services
@@ -100,7 +101,7 @@ class SchemaCollectionView(APIView):
 
     @extend_schema(
         operation_id="schemas_list",
-        responses={200: serializers.SubjectSummarySerializer(many=True)},
+        responses={200: page_envelope("SchemaSubjectPage", serializers.SubjectSummarySerializer)},
     )
     def get(self, request: Request) -> Response:
         workspace_id = _caller_workspace_id(request)
@@ -143,7 +144,9 @@ class SchemaVersionsView(APIView):
 
     @extend_schema(
         operation_id="schemas_versions_list",
-        responses={200: serializers.VersionProvenanceSerializer(many=True)},
+        responses={
+            200: page_envelope("SchemaVersionPage", serializers.VersionProvenanceSerializer)
+        },
     )
     def get(self, request: Request, subject: str) -> Response:
         workspace_id = _caller_workspace_id(request)

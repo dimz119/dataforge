@@ -187,7 +187,7 @@ export function subjectsQueryOptions(wsId: string) {
     queryFn: async (): Promise<SubjectSummary[]> => {
       const { data, error } = await api.GET('/api/v1/schemas');
       if (error) throw error as ApiError;
-      return data;
+      return data.data;
     },
   });
 }
@@ -217,7 +217,7 @@ export function subjectVersionsQueryOptions(wsId: string, subject: string) {
         params: { path: { subject } },
       });
       if (error) throw error as ApiError;
-      return data;
+      return data.data;
     },
   });
 }

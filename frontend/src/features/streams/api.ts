@@ -235,7 +235,7 @@ export function subjectsQueryOptions(wsId: string) {
     queryFn: async (): Promise<SubjectSummary[]> => {
       const { data, error } = await api.GET('/api/v1/schemas');
       if (error) throw error as ApiError;
-      return data;
+      return data.data;
     },
   });
 }

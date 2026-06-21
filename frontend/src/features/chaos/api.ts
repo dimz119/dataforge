@@ -189,7 +189,7 @@ export function useDriftEligibility(wsId: string, streamId: string): DriftEligib
         queryFn: async (): Promise<SubjectSummary[]> => {
           const { data, error } = await api.GET('/api/v1/schemas');
           if (error) throw error as ApiError;
-          return data;
+          return data.data;
         },
       },
     ],
