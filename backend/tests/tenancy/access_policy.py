@@ -188,6 +188,26 @@ ACCESS_POLICY: dict[tuple[str, str], RouteClass] = {
     # types (W-1/W-3 — TEN P6 "foreign stats → 404"). No credential → 401. SCOPE
     # captures foreign_jwt→404, foreign_key→404, no_cred→401 — identical to GET {id}.
     ("GET", "/api/v1/streams/{stream_id}/stats"): RouteClass.SCOPE,
+    # --- Chaos: live ChaosPolicy GET|PATCH (api-spec §4.8.3 #48-49) -----------
+    # Dual JWT|Key surfaces; GET needs streams:read, PATCH streams:write. The
+    # stream's owning workspace masks foreign access to 404 for both credential
+    # types (W-1/W-3). No credential → 401. SCOPE captures foreign_jwt→404,
+    # foreign_key→404, no_cred→401 — identical to the other stream sub-resources.
+    # (Insufficient scope within own workspace → 403 is the unit suite's job; the
+    # cross-tenant probe never reaches it — the workspace masks first.)
+    ("GET", "/api/v1/streams/{stream_id}/chaos"): RouteClass.SCOPE,
+    ("PATCH", "/api/v1/streams/{stream_id}/chaos"): RouteClass.SCOPE,
+    # --- Answer key: instructor ground truth (api-spec §4.13 #67-69) ----------
+    # Dual JWT(admin)|Key(answer_key:read) reads over chaos_injections; the
+    # stream's owning workspace masks foreign access to 404 for both credential
+    # types (W-1/W-3) BEFORE the admin/scope gate, so existence is never confirmed.
+    # No credential → 401. SCOPE captures foreign_jwt→404, foreign_key→404,
+    # no_cred→401. (Member-without-scope within own workspace → 403 is the unit
+    # suite's job; the cross-tenant probe never reaches it — the workspace masks
+    # first, identical to every other dual scope-gated stream sub-resource.)
+    ("GET", "/api/v1/streams/{stream_id}/answer-key/injections"): RouteClass.SCOPE,
+    ("GET", "/api/v1/streams/{stream_id}/answer-key/summary"): RouteClass.SCOPE,
+    ("GET", "/api/v1/streams/{stream_id}/answer-key/export"): RouteClass.SCOPE,
     # --- Delivery: REST cursor pull (api-spec §4.9.1; delivery-channels §5) ---
     # Dual JWT|Key(events:read) data-plane read over event_buffer; the stream's
     # owning workspace masks foreign access to 404 for both credential types (W-1/

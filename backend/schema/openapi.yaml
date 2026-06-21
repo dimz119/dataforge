@@ -752,6 +752,191 @@ paths:
               schema:
                 $ref: '#/components/schemas/StreamResponse'
           description: ''
+  /api/v1/streams/{stream_id}/answer-key/export:
+    get:
+      operationId: streams_answer_key_export
+      description: |-
+        GET /streams/{id}/answer-key/export (JSONL export of injection records).
+
+        Streams the filtered ``chaos_injections`` records as JSONL
+        (``application/x-ndjson``), one flattened record per line, newest-first — the bulk
+        counterpart of the paginated injections list for offline grading. Same auth, same
+        audit (``chaos.answer_key.accessed``) as the other answer-key reads.
+      parameters:
+      - in: query
+        name: event_id
+        schema:
+          type: string
+        description: Exact affected canonical event id.
+      - in: query
+        name: from
+        schema:
+          type: string
+        description: RFC-3339 lower bound on occurred_at.
+      - in: query
+        name: mode
+        schema:
+          type: string
+        description: One of the seven ChaosMode identifiers.
+      - in: path
+        name: stream_id
+        schema:
+          type: string
+        required: true
+      - in: query
+        name: to
+        schema:
+          type: string
+        description: RFC-3339 upper bound on occurred_at.
+      tags:
+      - streams
+      security:
+      - apiKeyAuth: []
+      - jwtAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/v1/streams/{stream_id}/answer-key/injections:
+    get:
+      operationId: streams_answer_key_injections
+      description: GET /streams/{id}/answer-key/injections (api-spec §4.13; chaos-engine
+        §7.3).
+      parameters:
+      - in: query
+        name: cursor
+        schema:
+          type: string
+        description: Opaque resume cursor (P-1).
+      - in: query
+        name: event_id
+        schema:
+          type: string
+        description: Exact affected canonical event id.
+      - in: query
+        name: from
+        schema:
+          type: string
+        description: RFC-3339 lower bound on occurred_at.
+      - in: query
+        name: limit
+        schema:
+          type: integer
+        description: Page size 1..500 (default 100).
+      - in: query
+        name: mode
+        schema:
+          type: string
+        description: One of the seven ChaosMode identifiers.
+      - in: path
+        name: stream_id
+        schema:
+          type: string
+        required: true
+      - in: query
+        name: to
+        schema:
+          type: string
+        description: RFC-3339 upper bound on occurred_at.
+      tags:
+      - streams
+      security:
+      - apiKeyAuth: []
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnswerKeyInjectionsPage'
+          description: ''
+  /api/v1/streams/{stream_id}/answer-key/summary:
+    get:
+      operationId: streams_answer_key_summary
+      description: GET /streams/{id}/answer-key/summary (api-spec §4.13; chaos-engine
+        §7.3).
+      parameters:
+      - in: query
+        name: event_id
+        schema:
+          type: string
+        description: Exact affected canonical event id.
+      - in: query
+        name: from
+        schema:
+          type: string
+        description: RFC-3339 lower bound on occurred_at.
+      - in: query
+        name: mode
+        schema:
+          type: string
+        description: One of the seven ChaosMode identifiers.
+      - in: path
+        name: stream_id
+        schema:
+          type: string
+        required: true
+      - in: query
+        name: to
+        schema:
+          type: string
+        description: RFC-3339 upper bound on occurred_at.
+      tags:
+      - streams
+      security:
+      - apiKeyAuth: []
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnswerKeySummary'
+          description: ''
+  /api/v1/streams/{stream_id}/chaos:
+    get:
+      operationId: streams_chaos_get
+      description: GET | PATCH /streams/{stream_id}/chaos (api-spec §4.8.3; chaos-engine
+        §3.5).
+      parameters:
+      - in: path
+        name: stream_id
+        schema:
+          type: string
+        required: true
+      tags:
+      - streams
+      security:
+      - apiKeyAuth: []
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChaosPolicyResponse'
+          description: ''
+    patch:
+      operationId: streams_chaos_patch
+      description: GET | PATCH /streams/{stream_id}/chaos (api-spec §4.8.3; chaos-engine
+        §3.5).
+      parameters:
+      - in: path
+        name: stream_id
+        schema:
+          type: string
+        required: true
+      tags:
+      - streams
+      security:
+      - apiKeyAuth: []
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChaosPolicyResponse'
+          description: ''
   /api/v1/streams/{stream_id}/events:
     get:
       operationId: streams_events
@@ -1509,6 +1694,85 @@ paths:
           description: ''
 components:
   schemas:
+    AnswerKeyInjection:
+      type: object
+      description: |-
+        One flattened InjectionRecord on the wire (api-spec §4.13 / event-model §7.3).
+
+        Common fields are typed; mode-specific members (``copies``, ``delay_simulated_ms``,
+        ``mutations``, …) are flattened from ``details`` and pass through as extra keys —
+        this serializer documents the stable common shape, the view emits the full record.
+      properties:
+        injection_id:
+          type: string
+          format: uuid
+        mode:
+          type: string
+        stream_id:
+          type: string
+          format: uuid
+        shard_id:
+          type: integer
+        event_id:
+          type: string
+          format: uuid
+        sequence_no:
+          type: integer
+        occurred_at:
+          type: string
+          format: date-time
+        canonical_emitted_at:
+          type: string
+          format: date-time
+        recorded_at:
+          type: string
+          format: date-time
+      required:
+      - canonical_emitted_at
+      - event_id
+      - injection_id
+      - mode
+      - occurred_at
+      - recorded_at
+      - sequence_no
+      - shard_id
+      - stream_id
+    AnswerKeyInjectionsPage:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/AnswerKeyInjection'
+        next_cursor:
+          type: string
+          nullable: true
+      required:
+      - data
+      - next_cursor
+    AnswerKeySummary:
+      type: object
+      description: The per-mode answer-key count aggregate (api-spec §4.13 summary).
+      properties:
+        stream_id:
+          type: string
+          format: uuid
+        window:
+          $ref: '#/components/schemas/_AnswerKeyWindow'
+        by_mode:
+          type: object
+          additionalProperties: {}
+        total_injections:
+          type: integer
+        as_of:
+          type: string
+          format: date-time
+      required:
+      - as_of
+      - by_mode
+      - stream_id
+      - total_injections
+      - window
     ApiKeyCreate:
       type: object
       properties:
@@ -1693,6 +1957,23 @@ components:
       required:
       - current_password
       - new_password
+    ChaosPolicyResponse:
+      type: object
+      description: The live ChaosPolicy resource (api-spec §4.8.3 GET/PATCH 200).
+      properties:
+        stream_id:
+          type: string
+          format: uuid
+        modes:
+          type: object
+          additionalProperties: {}
+        updated_at:
+          type: string
+          format: date-time
+      required:
+      - modes
+      - stream_id
+      - updated_at
     CompressionEnum:
       enum:
       - gzip
@@ -2732,6 +3013,20 @@ components:
       required:
       - data
       - next_cursor
+    _AnswerKeyWindow:
+      type: object
+      properties:
+        to:
+          type: string
+          format: date-time
+          nullable: true
+        from:
+          type: string
+          format: date-time
+          nullable: true
+      required:
+      - from
+      - to
     _DesiredState:
       type: object
       properties:

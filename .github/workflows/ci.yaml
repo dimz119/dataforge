@@ -115,7 +115,16 @@ jobs:
       # fast lane and gate the PR before the DB lanes. The 1M ``property_nightly``
       # profile is NOT run here (too slow; nightly + attended Phase-4 gate only) —
       # it is excluded by the pyproject ``addopts`` markexpr and never selected here.
-      - name: GOLD-A/GOLD-D replay + PROP-RI (100k PR profile)
+      # The chaos determinism + reconciliation gates ride this same pure lane:
+      #   * GOLD-C (all-7-modes byte-identity, ``golden`` marker) — Phase-9 exit #2,
+      #     selected by the ``golden`` markexpr below automatically;
+      #   * STAT-C1..C7 PR-smoke (per-mode 5% ± 1% over 10k, ``stat``-marked but the
+      #     pure-engine projection tests in tests/property/test_stat_chaos.py also ride
+      #     the unit lane below); the binding 50k STAT-C is nightly (stat_nightly).
+      # CI-gated here (pure, fast, no Postgres). The 128-combo CHD-7 matrix
+      # (chaos_nightly) and the 50k STAT-C (stat_nightly) are too slow for the PR lane
+      # and run in nightly.yaml; they are deselected by the pyproject addopts markexpr.
+      - name: GOLD-A/B/C + GOLD-D replay + PROP-RI (100k PR profile)
         run: uv run pytest -m "golden or property" -q
       # UNIT lane: in-memory SQLite, hermetic and fast (testing-strategy §2). The
       # default ``addopts`` deselects ``property_nightly``; this run also re-covers
@@ -235,9 +244,23 @@ jobs:
         # unit lane above; they are NOT RLS-bearing, and the WebsocketCommunicator +
         # transaction=True + background-task model is fragile against the Postgres test
         # DB, so they are deselected here (ignored), not re-run on Postgres.
+        # Phase 9 chaos PR subset rides this RLS lane (the answer-key/policy API +
+        # late-buffer lifecycle are RLS-bearing on chaos_injections / late_arrival_
+        # buffer; the CHD-1..6 determinism/reconciliation/drift suites are pure and
+        # ride along harmlessly):
+        #   * tests/chaos — CHD-1/2/3 per-mode determinism, CHD-4/5 reconciliation
+        #     (answer-key counts == delivered chaos; ledger hash unchanged), CHD-6
+        #     drift, CHD-8 late-buffer pause/resume/discard/flush/failover, and the
+        #     chaos-policy + answer-key API auth/scope/audit tests.
+        #   * tests/tenancy auto-enrolls the Phase-9 chaos + answer-key routes in the
+        #     cross-tenant probe (foreign cred → 404; classified SCOPE in
+        #     access_policy) and carries the explicit TEN §7.5(P9) chaos-isolation
+        #     probes (test_chaos_isolation_p9.py: max-rate chaos never leaks across
+        #     workspaces; answer key 403 under-scoped / 404 foreign) — permanent.
+        # The 128-combo CHD-7 matrix (chaos_nightly) is deselected here and runs nightly.
         run: >-
           uv run pytest tests/tenancy tests/guards tests/ops
-          tests/delivery
+          tests/chaos tests/delivery
           tests/generation/test_postgres
           --ignore tests/delivery/test_ws_consumer.py
           --ignore tests/delivery/test_ws_protocol.py

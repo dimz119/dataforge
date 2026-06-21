@@ -267,6 +267,8 @@ class StreamCollectionView(APIView):
             )
         except services.PinDeprecated as exc:
             raise ConflictError(str(exc)) from exc
+        except services.StreamCreationForbidden as exc:
+            raise PermissionDeniedError(str(exc)) from exc
         response = _response(stream, status_code=status.HTTP_201_CREATED)
         response["Location"] = f"/api/v1/streams/{stream.id}"
         return response

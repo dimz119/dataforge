@@ -67,15 +67,33 @@ class WorkspaceContextMiddleware:
         request.membership_summaries = SimpleLazyObject(  # type: ignore[attr-defined]
             lambda: _lazy_membership_summaries(request)
         )
+        # Snapshot the GUCs as they stand at request entry so the finally can
+        # RESTORE them rather than blindly clearing to empty. In production each
+        # request is its own ATOMIC_REQUESTS transaction with no GUC armed yet, so
+        # the snapshot is empty and restore == clear — the fail-closed guarantee is
+        # preserved (no request leaks its workspace into the next). When the request
+        # runs *inside* an already-armed transaction (the integration test lane wraps
+        # each test in one transaction and arms a workspace in its fixture), restore
+        # leaves that enclosing context intact instead of disarming it — ``SET LOCAL``
+        # is transaction-scoped, so an unconditional clear would wipe the GUC for the
+        # whole enclosing transaction and blind every post-request armed read. This is
+        # the Layer-2 GUC twin of the contextvar's reset(token) discipline below.
+        prior_workspace = guc.get_workspace_guc()
+        prior_user = guc.get_user_guc()
+        prior_platform = guc.get_platform_guc()
+        prior_api_key_prefix = guc.get_api_key_prefix_guc()
         try:
             return self.get_response(request)
         finally:
-            # Always clear — the fail-closed guarantee. The contextvar is reset to
-            # None and the transaction-local GUCs are emptied (the GUCs also die
-            # with the ATOMIC_REQUESTS transaction, but we clear explicitly so a
-            # non-atomic path is covered too).
+            # Always restore the entry snapshot — the fail-closed guarantee. The
+            # contextvar is reset to None (its own snapshot is taken at the top via
+            # activate(None)); the transaction-local GUCs are returned to their
+            # pre-request values (empty in production → cleared).
             context._active_workspace_id.set(None)
-            guc.clear_request_gucs()
+            guc.restore_workspace_guc(prior_workspace)
+            guc.restore_user_guc(prior_user)
+            guc.restore_platform_guc(prior_platform)
+            guc.restore_api_key_prefix_guc(prior_api_key_prefix)
 
 
 def arm_request_workspace(request: HttpRequest, workspace_id: uuid.UUID) -> None:

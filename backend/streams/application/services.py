@@ -92,6 +92,15 @@ class PinDeprecated(Exception):
     """The instance's pinned manifest version is deprecated (INV-CAT-5; 409)."""
 
 
+class StreamCreationForbidden(Exception):
+    """Stream creation attempted without a user session (403).
+
+    ``streams.created_by`` is NOT NULL → users.id; creation is a console (JWT)
+    operation. An API-key principal has no user, so creation is forbidden (the
+    ``streams:write`` scope covers lifecycle/TPS/chaos, not create — security §3.2).
+    """
+
+
 class StreamNotStartable(Exception):
     """A start was issued from a non-startable lifecycle state (409, T2 guard).
 
@@ -197,6 +206,14 @@ def create_stream(*, workspace: Any, data: StreamCreateInput, actor: Any) -> Str
     ``fencing_token = 0``. Created ``status = created``, desired ``stopped`` —
     emission begins at ``start``.
     """
+    # Stream creation records a human creator (streams.created_by is NOT NULL →
+    # users.id). It is a console (JWT) operation; an API-key principal has no user,
+    # so reject it cleanly here rather than letting the NOT-NULL constraint 500.
+    created_by = getattr(actor, "id", None)
+    if created_by is None:
+        raise StreamCreationForbidden(
+            "Stream creation requires a user session (JWT); API keys cannot create streams."
+        )
     pin = _resolve_instance_pin(data.scenario_instance_id, workspace_id=workspace.id)
     seed = data.seed if data.seed is not None else generate_seed()
     virtual_epoch = data.virtual_epoch or timezone.now()
@@ -222,7 +239,7 @@ def create_stream(*, workspace: Any, data: StreamCreateInput, actor: Any) -> Str
             clock_mode=data.clock_mode,
             backfill_days=data.backfill_days,
             shard_count=MVP_SHARD_COUNT,
-            created_by=getattr(actor, "id", None),
+            created_by=created_by,
         )
         # Seed the MVP shard registry row (shard_id = 0); fencing_token starts at 0.
         StreamShard.objects.create(
@@ -498,6 +515,45 @@ def request_rename(*, stream: Stream, name: str, actor: Any) -> Stream:
         stream.updated_at = now
         stream.save(update_fields=["name", "updated_at"])
         _audit_lifecycle("streams.stream.renamed", stream, actor, extra={"name": name})
+    return stream
+
+
+def request_set_chaos_policy(
+    *, stream: Stream, patch: dict[str, Any], actor: Any
+) -> Stream:
+    """PATCH the live ``chaos_config`` desired state (chaos-engine §3.5; PIN-3).
+
+    Mode-level merge, mode-internal replace (§3.5): each present mode key replaces
+    the stored entry wholesale; ``on_stop_policy`` replaces the scalar. Absent keys
+    are untouched. The merged document is written to the stream's desired-state
+    ``chaos_config`` (the runner's per-tick desired-state poll picks it up, applied
+    at the next tick boundary, ≤ 2 s). Every applied change audits
+    ``streams.stream.chaos_policy_changed`` with the before/after diff of the
+    touched keys (INV-AUD-2). The caller validates the patch against §3.4 bounds
+    BEFORE invoking this (a rejected patch never reaches here). Idempotent: a patch
+    that changes nothing is a silent no-op returning current state.
+    """
+    current = dict(stream.chaos_config or {})
+    merged = dict(current)
+    diff: dict[str, dict[str, Any]] = {}
+    for key, value in patch.items():
+        if current.get(key) == value:
+            continue
+        diff[key] = {"before": current.get(key), "after": value}
+        merged[key] = value
+    if not diff:
+        return stream  # no-op: the patch matches the live policy
+    now = timezone.now()
+    with transaction.atomic():
+        stream.chaos_config = merged
+        stream.updated_at = now
+        stream.save(update_fields=["chaos_config", "updated_at"])
+        _audit_lifecycle(
+            "streams.stream.chaos_policy_changed",
+            stream,
+            actor,
+            extra={"chaos_diff": diff},
+        )
     return stream
 
 

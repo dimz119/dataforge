@@ -470,6 +470,82 @@ export interface paths {
     patch: operations['streams_patch'];
     trace?: never;
   };
+  '/api/v1/streams/{stream_id}/answer-key/export': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * @description GET /streams/{id}/answer-key/export (JSONL export of injection records).
+     *
+     *     Streams the filtered ``chaos_injections`` records as JSONL
+     *     (``application/x-ndjson``), one flattened record per line, newest-first — the bulk
+     *     counterpart of the paginated injections list for offline grading. Same auth, same
+     *     audit (``chaos.answer_key.accessed``) as the other answer-key reads.
+     */
+    get: operations['streams_answer_key_export'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/streams/{stream_id}/answer-key/injections': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** @description GET /streams/{id}/answer-key/injections (api-spec §4.13; chaos-engine §7.3). */
+    get: operations['streams_answer_key_injections'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/streams/{stream_id}/answer-key/summary': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** @description GET /streams/{id}/answer-key/summary (api-spec §4.13; chaos-engine §7.3). */
+    get: operations['streams_answer_key_summary'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/streams/{stream_id}/chaos': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** @description GET | PATCH /streams/{stream_id}/chaos (api-spec §4.8.3; chaos-engine §3.5). */
+    get: operations['streams_chaos_get'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    /** @description GET | PATCH /streams/{stream_id}/chaos (api-spec §4.8.3; chaos-engine §3.5). */
+    patch: operations['streams_chaos_patch'];
+    trace?: never;
+  };
   '/api/v1/streams/{stream_id}/events': {
     parameters: {
       query?: never;
@@ -845,6 +921,46 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
   schemas: {
+    /**
+     * @description One flattened InjectionRecord on the wire (api-spec §4.13 / event-model §7.3).
+     *
+     *     Common fields are typed; mode-specific members (``copies``, ``delay_simulated_ms``,
+     *     ``mutations``, …) are flattened from ``details`` and pass through as extra keys —
+     *     this serializer documents the stable common shape, the view emits the full record.
+     */
+    AnswerKeyInjection: {
+      /** Format: uuid */
+      injection_id: string;
+      mode: string;
+      /** Format: uuid */
+      stream_id: string;
+      shard_id: number;
+      /** Format: uuid */
+      event_id: string;
+      sequence_no: number;
+      /** Format: date-time */
+      occurred_at: string;
+      /** Format: date-time */
+      canonical_emitted_at: string;
+      /** Format: date-time */
+      recorded_at: string;
+    };
+    AnswerKeyInjectionsPage: {
+      data: components['schemas']['AnswerKeyInjection'][];
+      next_cursor: string | null;
+    };
+    /** @description The per-mode answer-key count aggregate (api-spec §4.13 summary). */
+    AnswerKeySummary: {
+      /** Format: uuid */
+      stream_id: string;
+      window: components['schemas']['_AnswerKeyWindow'];
+      by_mode: {
+        [key: string]: unknown;
+      };
+      total_injections: number;
+      /** Format: date-time */
+      as_of: string;
+    };
     ApiKeyCreate: {
       name: string;
       scopes: components['schemas']['ScopesEnum'][];
@@ -918,6 +1034,16 @@ export interface components {
       current_password: string;
       new_password: string;
       refresh_token?: string;
+    };
+    /** @description The live ChaosPolicy resource (api-spec §4.8.3 GET/PATCH 200). */
+    ChaosPolicyResponse: {
+      /** Format: uuid */
+      stream_id: string;
+      modes: {
+        [key: string]: unknown;
+      };
+      /** Format: date-time */
+      updated_at: string;
     };
     /**
      * @description * `gzip` - gzip
@@ -1409,6 +1535,12 @@ export interface components {
     WorkspacePage: {
       data: components['schemas']['Workspace'][];
       next_cursor: string | null;
+    };
+    _AnswerKeyWindow: {
+      /** Format: date-time */
+      to: string | null;
+      /** Format: date-time */
+      from: string | null;
     };
     _DesiredState: {
       run_state: string;
@@ -2105,6 +2237,141 @@ export interface operations {
         };
         content: {
           'application/json': components['schemas']['StreamResponse'];
+        };
+      };
+    };
+  };
+  streams_answer_key_export: {
+    parameters: {
+      query?: {
+        /** @description Exact affected canonical event id. */
+        event_id?: string;
+        /** @description RFC-3339 lower bound on occurred_at. */
+        from?: string;
+        /** @description One of the seven ChaosMode identifiers. */
+        mode?: string;
+        /** @description RFC-3339 upper bound on occurred_at. */
+        to?: string;
+      };
+      header?: never;
+      path: {
+        stream_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description No response body */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+    };
+  };
+  streams_answer_key_injections: {
+    parameters: {
+      query?: {
+        /** @description Opaque resume cursor (P-1). */
+        cursor?: string;
+        /** @description Exact affected canonical event id. */
+        event_id?: string;
+        /** @description RFC-3339 lower bound on occurred_at. */
+        from?: string;
+        /** @description Page size 1..500 (default 100). */
+        limit?: number;
+        /** @description One of the seven ChaosMode identifiers. */
+        mode?: string;
+        /** @description RFC-3339 upper bound on occurred_at. */
+        to?: string;
+      };
+      header?: never;
+      path: {
+        stream_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['AnswerKeyInjectionsPage'];
+        };
+      };
+    };
+  };
+  streams_answer_key_summary: {
+    parameters: {
+      query?: {
+        /** @description Exact affected canonical event id. */
+        event_id?: string;
+        /** @description RFC-3339 lower bound on occurred_at. */
+        from?: string;
+        /** @description One of the seven ChaosMode identifiers. */
+        mode?: string;
+        /** @description RFC-3339 upper bound on occurred_at. */
+        to?: string;
+      };
+      header?: never;
+      path: {
+        stream_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['AnswerKeySummary'];
+        };
+      };
+    };
+  };
+  streams_chaos_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        stream_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ChaosPolicyResponse'];
+        };
+      };
+    };
+  };
+  streams_chaos_patch: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        stream_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ChaosPolicyResponse'];
         };
       };
     };

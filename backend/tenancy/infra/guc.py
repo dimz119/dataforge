@@ -28,6 +28,71 @@ def _is_postgres() -> bool:
     return connection.vendor == "postgresql"
 
 
+def _get_guc(name: str) -> str:
+    """Read a session GUC's current value (``''`` when unset). No-op off Postgres.
+
+    Uses ``current_setting(name, true)`` (the missing-ok form) so an unset GUC
+    returns NULL → ``''`` rather than raising. The returned string is the value to
+    *restore* on scope exit so a nested scope leaves the enclosing context intact
+    (the Layer-2 GUC twin of the Layer-1 contextvar's ``reset(token)`` discipline,
+    tenancy.domain.context — exit restores the *previous* value, not blindly empty).
+    """
+    if not _is_postgres():
+        return ""
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT coalesce(current_setting(%s, true), '')", [name])
+        row = cursor.fetchone()
+    return str(row[0]) if row and row[0] is not None else ""
+
+
+def _set_guc_raw(name: str, value: str) -> None:
+    """SET LOCAL a GUC to a raw string value (``''`` clears it). No-op off Postgres."""
+    if not _is_postgres():
+        return
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT set_config(%s, %s, true)", [name, value])
+
+
+def get_workspace_guc() -> str:
+    """The current ``app.workspace_id`` value (``''`` when unset) — for save/restore."""
+    return _get_guc("app.workspace_id")
+
+
+def get_user_guc() -> str:
+    """The current ``app.user_id`` value (``''`` when unset) — for save/restore."""
+    return _get_guc("app.user_id")
+
+
+def get_platform_guc() -> str:
+    """The current ``app.platform`` value (``''`` when unset) — for save/restore."""
+    return _get_guc("app.platform")
+
+
+def get_api_key_prefix_guc() -> str:
+    """The current ``app.api_key_prefix`` value (``''`` when unset) — for save/restore."""
+    return _get_guc("app.api_key_prefix")
+
+
+def restore_workspace_guc(value: str) -> None:
+    """Restore ``app.workspace_id`` to a previously-saved raw value (``''`` clears)."""
+    _set_guc_raw("app.workspace_id", value)
+
+
+def restore_user_guc(value: str) -> None:
+    """Restore ``app.user_id`` to a previously-saved raw value (``''`` clears)."""
+    _set_guc_raw("app.user_id", value)
+
+
+def restore_platform_guc(value: str) -> None:
+    """Restore ``app.platform`` to a previously-saved raw value (``''`` clears)."""
+    _set_guc_raw("app.platform", value)
+
+
+def restore_api_key_prefix_guc(value: str) -> None:
+    """Restore ``app.api_key_prefix`` to a previously-saved raw value (``''`` clears)."""
+    _set_guc_raw("app.api_key_prefix", value)
+
+
 def set_workspace_guc(workspace_id: uuid.UUID | None) -> None:
     """SET LOCAL app.workspace_id for the current transaction (RLS arming)."""
     if not _is_postgres():
