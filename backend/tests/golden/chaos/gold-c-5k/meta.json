@@ -1,0 +1,12 @@
+{
+  "canonical_events": 5000,
+  "config_sha256": "e80c30edb88d58825636524278d1a1fa558260f9cb9bd8297fc6ff2d252f3b44",
+  "delivered_count": 4446,
+  "delivered_sha256": "a96deee53d37743830ecca9016220eb8c8867ef17fd8ddb9791fe79753d52147",
+  "envelope_version": "1.0",
+  "fixture": "gold-c-5k",
+  "injection_count": 3302,
+  "injections_sha256": "2f56ba09ce7f17b31b7323cbbd2b7b7e8c9b982423cf5ff2f310e925c43749d6",
+  "modes": "all-7",
+  "seed": 271828182847
+}
