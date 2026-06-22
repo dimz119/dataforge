@@ -106,6 +106,11 @@ export function CreateStreamPage() {
         // Blank seed → server-generated (INV-STR-5); omit the key when empty.
         ...(seed.trim() !== '' ? { seed: seed.trim() } : {}),
         target_tps: tps,
+        // Shard count is pinned at start (immutable, part of the determinism pin,
+        // INV-STR-5). The console runs the MVP single-shard layout (N=1); a per-stream
+        // shard picker is not exposed yet, so we send the platform default explicitly
+        // now that the create contract (P11-01) requires it.
+        shard_count: 1,
         // Phase 8: virtual_clock carries the unlocked speed_multiplier (decimal
         // string per the API contract). Backfill mode is realized via the datasets
         // resource (§4.10), not a stream-create field, so it is not sent here.

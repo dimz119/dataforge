@@ -2,6 +2,7 @@ import { StatusBadge } from '../../../shared/ui';
 import type { StreamResponse } from '../../../shared/api/types';
 import { controlRow } from '../controlMatrix';
 import { LifecycleButtons } from './LifecycleButtons';
+import { PausedRecoveryBanner } from './PausedRecoveryBanner';
 import { PinSummary } from './PinSummary';
 import { SchemaPanel } from './SchemaPanel';
 import { StreamDangerZone } from './StreamDangerZone';
@@ -28,6 +29,8 @@ export function StreamControlPanel({ workspaceId, slug, stream, tpsCap }: Stream
 
   return (
     <div className="space-y-6">
+      <PausedRecoveryBanner workspaceId={workspaceId} stream={stream} />
+
       <section
         aria-labelledby="controls-heading"
         className="space-y-4 rounded-lg border border-border bg-surface p-5"

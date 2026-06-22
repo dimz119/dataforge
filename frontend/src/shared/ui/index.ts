@@ -4,6 +4,7 @@ export { Input, type InputProps } from './Input';
 export { FormField, type FormFieldProps } from './FormField';
 export { PageHeader, type PageHeaderProps } from './PageHeader';
 export { StatusBadge, type StatusBadgeProps } from './StatusBadge';
+export { QuotaMeter, type QuotaMeterProps } from './QuotaMeter';
 export { Sparkline, type SparklineProps } from './Sparkline';
 export { Skeleton, PageSkeleton, type SkeletonProps } from './Skeleton';
 export { EmptyState, type EmptyStateProps } from './EmptyState';

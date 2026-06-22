@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { useActiveWorkspace, useSessionUser } from '../../../shared/api/useActiveWorkspace';
 import { Button, NotFoundPage, PageHeader } from '../../../shared/ui';
 import { activityQueryOptions, membersQueryOptions } from '../api';
+import { ActivityExportButton } from '../components/ActivityExportButton';
 import { ActivityList } from '../components/ActivityList';
 import { DangerZone } from '../components/DangerZone';
 import { InviteMemberDialog } from '../components/InviteMemberDialog';
@@ -50,9 +51,16 @@ export function SettingsPage() {
       </section>
 
       <section aria-labelledby="activity-heading">
-        <h2 id="activity-heading" className="mb-3 text-sm font-semibold uppercase tracking-wide text-text-muted">
-          Activity
-        </h2>
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <h2 id="activity-heading" className="text-sm font-semibold uppercase tracking-wide text-text-muted">
+            Activity
+          </h2>
+          <ActivityExportButton
+            entries={activity.data ?? []}
+            slug={ws.slug}
+            disabled={activity.isPending || Boolean(activity.error)}
+          />
+        </div>
         <ActivityList
           entries={activity.data ?? []}
           isLoading={activity.isPending}

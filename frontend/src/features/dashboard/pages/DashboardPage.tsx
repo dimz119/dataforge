@@ -10,6 +10,8 @@ import { useActiveWorkspace } from '../../../shared/api/useActiveWorkspace';
 import { isSettled } from '../../../shared/api/polling';
 import type { StreamResponse } from '../../../shared/api/types';
 import {
+  quotaUsage,
+  quotasQueryOptions,
   streamStatsQueryOptions,
   streamsQueryOptions,
   workspaceDetailQueryOptions,
@@ -38,6 +40,7 @@ export function DashboardPage() {
   const wsId = ws?.workspaceId ?? '';
   const workspace = useQuery({ ...workspaceDetailQueryOptions(wsId), enabled: Boolean(wsId) });
   const streams = useQuery({ ...streamsQueryOptions(wsId), enabled: Boolean(wsId) });
+  const quotas = useQuery({ ...quotasQueryOptions(wsId), enabled: Boolean(wsId) });
 
   const topStreams = (streams.data ?? []).slice().sort(byRecency).slice(0, TOP_N);
 
@@ -69,6 +72,7 @@ export function DashboardPage() {
         workspace={workspace.data}
         streams={streams.data ?? []}
         eventsToday={eventsToday}
+        quotas={quotas.data ? quotaUsage(quotas.data) : undefined}
         isLoading={workspace.isPending || streams.isPending}
       />
 
