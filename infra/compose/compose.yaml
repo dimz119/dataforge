@@ -275,7 +275,62 @@ services:
       retries: 5
       start_period: 5s
 
+  # --- OPTIONAL observability profile (Phase 11, P11-06) -------------------
+  # Off by default; bring up with:
+  #   docker compose -f infra/compose/compose.yaml --profile observability up -d
+  # Prometheus loads the SLO recording rules + 16-alert burn/operational rules
+  # and scrapes the df_ /metrics exposers (one target per process group);
+  # Grafana auto-provisions the six dashboards. This is the dev/staging mirror
+  # of the prod scrape — in prod (M-1) Fly scrapes via fly.toml [[metrics]].
+  # See infra/observability/README.md.
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    profiles: ["observability"]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+    ports:
+      - "9090:9090"
+    volumes:
+      - ../observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../observability/prometheus/slo-recording-rules.yml:/etc/prometheus/rules/slo-recording-rules.yml:ro
+      - ../observability/prometheus/slo-alerts.yml:/etc/prometheus/rules/slo-alerts.yml:ro
+      - promdata:/prometheus
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9090/-/healthy || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    profiles: ["observability"]
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Admin"
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_DEFAULT_THEME: "dark"
+    ports:
+      - "3000:3000"
+    volumes:
+      - ../observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafanadata:/var/lib/grafana
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
 volumes:
   pgdata:
   redisdata:
   kafkadata:
+  promdata:
+  grafanadata:

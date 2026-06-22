@@ -1,0 +1,80 @@
+# DataForge dev Prometheus config (Phase 11, P11-06).
+#
+# Loads the SLO recording rules + the 16-alert burn/operational rules and scrapes
+# the df_ metrics exposers. ONE scrape target per PROCESS GROUP, not per logical
+# service (foundation note): start_metrics_server uses a process-global exposer,
+# so the runner process that also hosts buffer-writer + ws-pusher threads exposes
+# all three families on ONE side port (DF_METRICS_PORT, default 9091). The web
+# tier serves /metrics through Django on its shared WSGI port instead.
+#
+# This file backs the OPTIONAL dev compose `observability` profile
+# (see ../README.md). In production (M-1) Fly scrapes via fly.toml [[metrics]]
+# per process group — Prometheus here is the dev/staging mirror, not the prod
+# scraper.
+#
+# Service-discovery here is static (compose DNS names). Validated by
+# yaml.safe_load (artifact-only).
+
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 15s
+  external_labels:
+    env: dev
+    cluster: dataforge-compose
+
+rule_files:
+  - /etc/prometheus/rules/slo-recording-rules.yml
+  - /etc/prometheus/rules/slo-alerts.yml
+
+# Alertmanager is optional in dev; left unconfigured here. Staging/prod wire an
+# alertmanager_configs block. Rules still evaluate and surface in the Prometheus
+# UI "Alerts" tab without it.
+alerting:
+  alertmanagers: []
+
+scrape_configs:
+  # ---- web tier: /metrics on the shared Django WSGI port (8000) ----
+  - job_name: web
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["api:8000"]
+        labels:
+          process_group: web
+
+  # ---- ws tier: /metrics on the ASGI port (8001) ----
+  - job_name: ws
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["ws:8001"]
+        labels:
+          process_group: ws
+
+  # ---- worker + beat: side-port exposer (DF_METRICS_PORT 9091) ----
+  - job_name: worker
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["worker:9091"]
+        labels:
+          process_group: worker
+
+  # ---- runner: side-port exposer; ONE exposer hosts runner family only ----
+  - job_name: runner
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["runner:9091"]
+        labels:
+          process_group: runner
+
+  # ---- sink host (buffer-writer + ws-pusher threads share ONE 9091 exposer) ----
+  - job_name: sinks
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["buffer-writer:9091"]
+        labels:
+          process_group: sinks
+
+  # ---- Prometheus self-scrape (up/scrape health) ----
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

@@ -56,6 +56,7 @@ ALLOWED_OPTIONAL: frozenset[str] = frozenset(
         "pnpm-workspace.yaml",  # listed in D19 §1; materializes if pnpm is adopted
         ".git",
         ".gitleaks.toml",
+        ".trivyignore",  # Trivy dependency-vuln scan exception file (GA-SECURITY item 13)
         # Local, gitignored tooling/scratch entries (never committed):
         ".omc",
         ".claude",
