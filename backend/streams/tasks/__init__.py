@@ -8,6 +8,7 @@ re-exported so Celery's ``autodiscover_tasks(related_name="tasks")`` registers t
 when the ``streams.tasks`` package is imported.
 """
 
+from streams.tasks.idle import idle_auto_pause
 from streams.tasks.lifecycle import fail_stream, system_pause_stream
 from streams.tasks.maintenance import (
     maintain_buffer_partitions,
@@ -17,6 +18,7 @@ from streams.tasks.watchdog import lease_expiry_watchdog
 
 __all__ = [
     "fail_stream",
+    "idle_auto_pause",
     "lease_expiry_watchdog",
     "maintain_buffer_partitions",
     "maintain_ledger_partitions",

@@ -339,6 +339,29 @@ class ApiKeyDetailView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+def _live_quota_usage(workspace_id: uuid.UUID) -> dict[str, int]:
+    """Current quota consumption for the QuotaMeter (P11-07/09).
+
+    Reads under the already-armed workspace context (the caller resolved + armed the
+    workspace for read). ``events_today`` is the Redis day bucket (durable fallback);
+    ``concurrent_streams`` + ``aggregate_tps`` are the live occupied-stream counts.
+    """
+    from django.db.models import Sum
+
+    from streams.application import metering
+    from streams.application import quotas as stream_quotas
+    from streams.domain.models import Stream
+
+    occupied = Stream.objects.exclude(  # scoped to the armed workspace
+        lifecycle_state__in=stream_quotas._IDLE_STATES
+    )
+    return {
+        "events_today": metering.events_consumed_today(workspace_id),
+        "concurrent_streams": occupied.count(),
+        "aggregate_tps": int(occupied.aggregate(total=Sum("target_tps"))["total"] or 0),
+    }
+
+
 class QuotaView(APIView):
     """GET /workspaces/{id}/quotas (api-spec §4.4). JWT | Key(streams:read).
 
@@ -358,16 +381,29 @@ class QuotaView(APIView):
         ).first()
         if quota is None:
             raise NotFoundError()
-        # Usage metering is Phase 11 — unmetered counters report 0 (api-spec §4.4).
+        # Live usage metering (P11-07/09): events/day from the Redis day bucket
+        # (durable fallback), concurrent-stream + aggregate-TPS from the live Stream
+        # rows under the armed workspace context. The console QuotaMeter renders
+        # used/limit from this (events_per_day is the headline meter).
+        usage = _live_quota_usage(ws.id)
         body = {
             "workspace_id": str(ws.id),
             "plan": ws.plan,
             "quotas": {
                 "workspace_members": {"limit": quota.max_members, "used": 0},
-                "concurrent_streams": {"limit": quota.max_concurrent_streams, "used": 0},
+                "concurrent_streams": {
+                    "limit": quota.max_concurrent_streams,
+                    "used": usage["concurrent_streams"],
+                },
                 "per_stream_tps_cap": {"limit": quota.per_stream_tps_cap},
-                "aggregate_tps_cap": {"limit": quota.aggregate_tps_cap, "used": 0},
-                "events_per_day": {"limit": quota.events_per_day, "used": 0},
+                "aggregate_tps_cap": {
+                    "limit": quota.aggregate_tps_cap,
+                    "used": usage["aggregate_tps"],
+                },
+                "events_per_day": {
+                    "limit": quota.events_per_day,
+                    "used": usage["events_today"],
+                },
                 "buffer_retention_hours": {"limit": quota.buffer_retention_hours},
                 "backfill": {
                     "max_simulated_days": quota.backfill_max_days,

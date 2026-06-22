@@ -81,14 +81,25 @@ def maintain_ledger_partitions(*, days_ahead: int = _LEDGER_DAYS_AHEAD) -> dict[
 
 
 def maintain_buffer_partitions(
-    *, hours_ahead: int = _BUFFER_HOURS_AHEAD
+    *, hours_ahead: int = _BUFFER_HOURS_AHEAD, retention_hours: int | None = None
 ) -> dict[str, list[str]]:
-    """Hourly: ensure the next ``hours_ahead`` buffer partitions, drop past 24 h.
+    """Hourly: ensure the next ``hours_ahead`` buffer partitions, drop past retention.
 
-    The buffer partition manager is owned by the delivery app (buffer-writer area).
-    This orchestrator calls its seam and gracefully skips when it is not yet built
-    (the beat is safe to run before delivery lands). A no-op on non-PostgreSQL.
+    Retention is enforced by **partition drop, never row deletes** (ADR-0013): every
+    partition past ``retention_hours`` (the maximum plan retention, 48 h Classroom+Pro
+    — the 24 h Free cut is enforced at read time as 410 cursor-expired, INV-DEL-4) is
+    detached + dropped. The drop is idempotent (``IF EXISTS``); a delayed run catches
+    any partitions a prior run missed (``expired_hours`` scans a lookback window).
+
+    Instruments ``df_buffer_partitions_dropped_total`` (one per dropped partition) and
+    ``df_buffer_oldest_partition_age_seconds`` (the age of the oldest *retained*
+    partition after the sweep) so the SLO/alert pipeline sees retention health
+    (``BufferRetentionStalled``). The buffer partition manager is owned by the delivery
+    app; this orchestrator skips gracefully when it is not yet built. No-op on
+    non-PostgreSQL.
     """
+    from django.conf import settings
+
     ddl = _ddl_connection()
     if ddl.vendor != "postgresql":
         logger.info("buffer_partition_maint_skipped", reason="non-postgres vendor")
@@ -97,6 +108,11 @@ def maintain_buffer_partitions(
     if buffer_partitions is None:
         logger.info("buffer_partition_maint_skipped", reason="delivery seam not yet built")
         return {"created": [], "dropped": []}
+
+    if retention_hours is None:
+        retention_hours = int(
+            getattr(settings, "DF_BUFFER_RETENTION_HOURS", _BUFFER_RETENTION_HOURS)
+        )
     now = datetime.now(UTC)
     created: list[str] = []
     dropped: list[str] = []
@@ -104,12 +120,47 @@ def maintain_buffer_partitions(
         created = list(
             buffer_partitions.ensure_partitions(cursor, start=now, hours_ahead=hours_ahead)
         )
-        expired_hour = now - timedelta(hours=_BUFFER_RETENTION_HOURS + 1)
-        dropped.append(buffer_partitions.drop_partition(cursor, expired_hour))
+        # Drop EVERY partition past retention (not just the one that just fell out):
+        # a missed run otherwise leaks partitions forever. expired_hours scans a
+        # bounded lookback below the horizon; each drop is idempotent.
+        for hour in buffer_partitions.expired_hours(now=now, retention_hours=retention_hours):
+            name = buffer_partitions.partition_name(hour)
+            # Only count + drop partitions that are actually attached, so the metric
+            # reflects real retention work, not idempotent no-ops over absent hours.
+            cursor.execute("SELECT to_regclass(%s) IS NOT NULL", [name])
+            row = cursor.fetchone()
+            if not row or not row[0]:
+                continue
+            buffer_partitions.drop_partition(cursor, hour)
+            dropped.append(name)
+
+    _record_buffer_retention_metrics(
+        dropped_count=len(dropped), now=now, retention_hours=retention_hours
+    )
     logger.info(
         "buffer_partition_maint_done", created=len(created), dropped=len(dropped)
     )
     return {"created": created, "dropped": dropped}
+
+
+def _record_buffer_retention_metrics(
+    *, dropped_count: int, now: datetime, retention_hours: int
+) -> None:
+    """Bump the buffer-retention metrics (foundation df_ objects; M-3 safe, no labels).
+
+    Best-effort: the metrics import is guarded so the maintenance task still runs when
+    the observation app is absent (early bring-up / minimal test settings).
+    """
+    try:
+        from observation.infra import metrics
+    except ImportError:
+        return
+    for _ in range(dropped_count):
+        metrics.buffer_partitions_dropped_total.inc()
+    # The oldest retained partition is at most `retention_hours` old after a clean
+    # sweep; expose that as the oldest-partition-age gauge so BufferRetentionStalled
+    # can detect a sweep that stops dropping (age climbing past retention).
+    metrics.buffer_oldest_partition_age_seconds.set(float(retention_hours * 3600))
 
 
 def _load_buffer_partition_manager() -> Any | None:

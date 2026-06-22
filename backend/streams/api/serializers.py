@@ -20,6 +20,9 @@ from rest_framework import serializers
 _TPS_MIN = 1
 _TPS_MAX = 1000
 _SEED_MAX = (2**63) - 1
+# Shards/stream platform cap (scaling-strategy §2.2/§5.2): pinned at start, immutable.
+_SHARD_COUNT_MIN = 1
+_SHARD_COUNT_MAX = 64
 
 
 class VirtualClockInputSerializer(serializers.Serializer[Any]):
@@ -51,6 +54,12 @@ class StreamCreateSerializer(serializers.Serializer[Any]):
     seed = serializers.CharField(required=False, allow_null=True)
     target_tps = serializers.IntegerField(
         required=False, default=10, min_value=_TPS_MIN, max_value=_TPS_MAX
+    )
+    # Shard count is pinned at start and immutable for the life of the stream (part of
+    # the determinism pin, INV-STR-5; scaling-strategy §2.2). Bounded 1..64 (the
+    # platform shards/stream cap, §5.2); defaults to 1 (the MVP single-shard layout).
+    shard_count = serializers.IntegerField(
+        required=False, default=1, min_value=_SHARD_COUNT_MIN, max_value=_SHARD_COUNT_MAX
     )
     chaos = serializers.DictField(required=False, default=dict)
     # Per-subject schema pins (schema-registry §10.1): {subject: version}. Empty (the

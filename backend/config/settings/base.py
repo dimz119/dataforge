@@ -22,6 +22,10 @@ RELEASE = env.str("DF_RELEASE", default="dev")  # image tag / git SHA (observabi
 # Process role for log `service` field and readyz gating set; each entrypoint
 # (wsgi/asgi/celery/runner) sets its own default before settings import.
 DF_SERVICE = env.str("DF_SERVICE", default="web")
+# Prometheus scrape port for this process's df_ metrics exposer (observability §4,
+# §6.3). Every process group exposes /metrics on its own port; the deployment maps
+# one scrape target per process group. 0 disables the exposer (used by tests).
+DF_METRICS_PORT = env.int("DF_METRICS_PORT", default=9091)
 
 SECRET_KEY = env.str(
     "DJANGO_SECRET_KEY",
@@ -82,6 +86,7 @@ MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.common.CommonMiddleware",
     "tenancy.api.middleware.WorkspaceContextMiddleware",
+    "config.rate_limit_middleware.RateLimitMiddleware",
 ]
 
 ROOT_URLCONF = "config.urls"
@@ -267,6 +272,34 @@ TURNSTILE_SECRET_KEY = env.str("TURNSTILE_SECRET_KEY", default="")
 # RL-1 signup: 5/h (burst 3) + 20/day per IP (security §5.4). Tunable per-env.
 SIGNUP_RATE_LIMIT_PER_HOUR = env.int("SIGNUP_RATE_LIMIT_PER_HOUR", default=5)
 SIGNUP_RATE_LIMIT_PER_DAY = env.int("SIGNUP_RATE_LIMIT_PER_DAY", default=20)
+
+# Per-key rate limiting (P11-08; api-spec §2.8). Off by default so unit/integration
+# suites are not throttled; production/staging set DF_RATE_LIMIT_ENABLED=1.
+DF_RATE_LIMIT_ENABLED = env.bool("DF_RATE_LIMIT_ENABLED", default=False)
+
+# --- Data-lifecycle / retention jobs (P11-11; deployment-architecture §9) -----
+# The ledger keeps a 48 h hot window in Postgres; daily 02:00 the archive job
+# exports partitions older than this to Parquet on object storage, verifies the
+# row count, then drops the partition (§9.2-9.3). Total ledger retention (incl.
+# the cold Parquet tier) is 7 days (domain-model §2.6).
+DF_LEDGER_HOT_HOURS = env.int("DF_LEDGER_HOT_HOURS", default=48)
+DF_LEDGER_RETENTION_DAYS = env.int("DF_LEDGER_RETENTION_DAYS", default=7)
+# Where archived Parquet objects + manifests are written. In dev/compose this is a
+# local directory; in prod it is a Tigris/S3-backed mount (a path, never a secret).
+DF_LEDGER_ARCHIVE_DIR = env.str(
+    "DF_LEDGER_ARCHIVE_DIR", default=str(BASE_DIR / "var" / "ledger-archive")
+)
+# Buffer physical retention is plan-dependent (24 h Free / 48 h Classroom+Pro,
+# PRD §7). Partitions are workspace-agnostic (hourly RANGE), so the platform job
+# keeps the maximum plan retention and the per-plan 24 h cut is enforced at read
+# time (a cursor into a >24 h partition on a Free plan yields 410 cursor-expired).
+DF_BUFFER_RETENTION_HOURS = env.int("DF_BUFFER_RETENTION_HOURS", default=48)
+
+# Platform admission control (P11-07; scaling-strategy §5). The measured capacity
+# (events/s) and the headroom fraction provisioned Σ target_tps may use. The default
+# models the GA 5 k ceiling (3,500 eps at 70 %); staging may set a smaller capacity.
+DF_ADMISSION_CAPACITY_EPS = env.int("DF_ADMISSION_CAPACITY_EPS", default=3500)
+DF_ADMISSION_HEADROOM_FRACTION = env.float("DF_ADMISSION_HEADROOM_FRACTION", default=0.70)
 
 # --- Runner / lease contract values (backend-architecture §11) ---------------
 RUNNER_TICK_MS = env.int("RUNNER_TICK_MS", default=1000)

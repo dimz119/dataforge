@@ -34,6 +34,7 @@ dependencies = [
     # §6 frame contract; the engine stays free of them (import-linter contract 2).
     "channels>=4.1",
     "channels-redis>=4.2",
+    "prometheus-client>=0.21",
 ]
 
 [dependency-groups]
@@ -114,6 +115,13 @@ ignore_errors = true
 
 [[tool.mypy.overrides]]
 module = ["confluent_kafka", "confluent_kafka.*", "environ", "environ.*"]
+ignore_missing_imports = true
+
+# Phase 11: pyarrow (ledger archive-to-Parquet, P11-11) is an optional prod-only
+# dependency — installed where the columnar archive runs, absent in the dev/compose
+# lane (the archive falls back to JSONL.gz). It ships no first-party stubs.
+[[tool.mypy.overrides]]
+module = ["pyarrow", "pyarrow.*"]
 ignore_missing_imports = true
 
 # Phase 6: Channels (the WS ASGI framework) ships no type stubs (types-channels is

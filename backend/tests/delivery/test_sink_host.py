@@ -95,6 +95,11 @@ class _FakeConsumer:
     def resume(self, partitions: Any) -> None:
         self.resumed.extend(tuple(p) for p in partitions)
 
+    def high_watermark(self, topic: str, partition: int) -> int | None:
+        # The unit-test fake does not expose broker watermarks (host.py treats a
+        # ``None`` probe as "lag metric simply not updated this commit").
+        return None
+
     def close(self) -> None:
         return None
 

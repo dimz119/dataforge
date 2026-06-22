@@ -9,6 +9,7 @@ import os
 from typing import Any
 
 from celery import Celery
+from celery.schedules import crontab
 from celery.signals import celeryd_init
 from kombu import Queue
 
@@ -48,6 +49,8 @@ app.conf.task_routes = {
     # Phase 5: partition maintenance (maintenance queue, §7.1; ADR-0013 retention).
     "streams.maintain_ledger_partitions": {"queue": "maintenance"},
     "streams.maintain_buffer_partitions": {"queue": "maintenance"},
+    # Phase 11: ledger archive-to-Parquet (maintenance queue, §9.2-9.3 retention).
+    "generation.archive_ledger_partitions": {"queue": "maintenance"},
 }
 
 # Beat schedule (control plane only; backend-architecture §7.1, §7.4). The beat
@@ -69,6 +72,16 @@ app.conf.beat_schedule = {
     "streams-maintain-ledger-partitions": {
         "task": "streams.maintain_ledger_partitions",
         "schedule": 86400.0,  # daily (ground_truth_ledger daily partitions, §5.5)
+    },
+    "streams-idle-auto-pause": {
+        "task": "streams.idle_auto_pause",
+        "schedule": 300.0,  # every 5 min: pause streams idle past idle_pause_minutes (P11-07)
+    },
+    "generation-archive-ledger-partitions": {
+        "task": "generation.archive_ledger_partitions",
+        # Daily 02:00 UTC (deployment-architecture §9.2): export ledger partitions
+        # older than the 48 h hot window to Parquet, verify counts, then drop.
+        "schedule": crontab(hour=2, minute=0),
     },
 }
 
@@ -95,3 +108,10 @@ def _label_worker_service(**_kwargs: Any) -> None:
         level=settings.LOG_LEVEL,
         per_logger_levels=settings.DF_LOG_LEVELS,
     )
+
+    # Expose this worker's df_ metrics on DF_METRICS_PORT (observability §4). The
+    # beat scheduler runs inside the worker group (§7.4), so one exposer per worker
+    # process covers both worker and beat series.
+    from observation.infra import metrics
+
+    metrics.start_metrics_server(settings.DF_METRICS_PORT)

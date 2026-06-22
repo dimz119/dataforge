@@ -5,9 +5,10 @@ plain function views only for /healthz, /readyz, and the WS upgrade path).
 """
 
 from django.conf import settings
-from django.http import HttpRequest, JsonResponse
+from django.http import HttpRequest, HttpResponse, JsonResponse
 
 from observation.application import readiness
+from observation.infra import metrics
 
 
 def healthz(request: HttpRequest) -> JsonResponse:
@@ -36,3 +37,14 @@ def readyz(request: HttpRequest) -> JsonResponse:
         },
         status=200 if report.ready else 503,
     )
+
+
+def metrics_view(request: HttpRequest) -> HttpResponse:
+    """Prometheus scrape endpoint for the ``web`` tier (observability §4, §6.3).
+
+    The web group serves /metrics through Django (same WSGI server) rather than a
+    side port; non-WSGI groups use ``metrics.start_metrics_server``. Plain function
+    view, outside DRF, like /healthz and /readyz (backend-architecture §6).
+    """
+    body, content_type = metrics.render_latest()
+    return HttpResponse(body, content_type=content_type)

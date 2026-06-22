@@ -71,6 +71,17 @@ class InjectionRecorder:
         ChaosInjection.objects.bulk_create(rows, ignore_conflicts=True)
         count = len(rows)
         self.recorded_total += count
+        # df_chaos_injections_total{mode} (§4 chaos family): one count per recorded
+        # injection by its mode (a closed, bounded set of fault modes — M-3 safe).
+        # Counted at flush (record-before-effect, INV-CHA-4) so the answer-key row is
+        # already durable. Best-effort: a metrics error never un-records truth.
+        try:
+            from observation.infra import metrics
+
+            for row in rows:
+                metrics.chaos_injections_total.labels(mode=str(row.mode)).inc()
+        except Exception:  # pragma: no cover - metrics must never break recording
+            pass
         self._buffer = []
         self._seen = set()
         return count

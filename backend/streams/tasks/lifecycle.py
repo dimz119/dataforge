@@ -29,7 +29,6 @@ from celery import shared_task
 
 from streams.application import services
 from streams.domain.models import (
-    LC_RUNNING,
     REASON_ERROR,
     REASON_IDLE,
     REASON_QUOTA,
@@ -51,9 +50,12 @@ def _scoped_stream(stream_id: UUID) -> Stream | None:
 def system_pause_stream(stream_id: str, reason: str) -> dict[str, str]:
     """T5 system pause (quota/idle): write desired = paused + the system reason.
 
-    Only pauses a ``running`` stream (the T5 source state); a no-op otherwise
-    (idempotent). ``reason`` must be ``quota`` or ``idle`` (the two system-pause
-    reasons, domain-model §4.3 T5); anything else is rejected as an error reason.
+    Delegates to :func:`streams.application.services.system_pause`, which writes the
+    desired ``paused`` + system ``status_reason`` (rendered ``paused_quota`` /
+    ``paused_idle``), audits ``streams.stream.system_paused {reason}`` in the same
+    transaction (INV-AUD-2), and bumps ``df_quota_pauses_total{reason}`` (P11-07).
+    Only pauses a live stream (the T5 source states); a no-op otherwise (idempotent).
+    ``reason`` must be ``quota`` or ``idle``; anything else defaults to ``quota``.
     """
     from tenancy.application.services import worker_workspace_scope
 
@@ -65,12 +67,12 @@ def system_pause_stream(stream_id: str, reason: str) -> dict[str, str]:
         return {"stream_id": str(sid), "result": "not_found"}
     with worker_workspace_scope(owner):
         stream = _scoped_stream(sid)
-        if stream is None or stream.lifecycle_state != LC_RUNNING:
+        if stream is None:
+            return {"stream_id": str(sid), "result": "not_found"}
+        before = stream.desired_state
+        stream = services.system_pause(stream=stream, reason=pause_reason)
+        if stream.desired_state == before:
             return {"stream_id": str(sid), "result": "noop"}
-        stream = services.request_pause(stream=stream, actor="system")
-        # Overwrite the user reason with the system reason (quota/idle).
-        stream.status_reason = pause_reason
-        stream.save(update_fields=["status_reason", "updated_at"])
     logger.info("system_pause_stream_done", stream_id=str(sid), reason=pause_reason)
     return {"stream_id": str(sid), "result": "paused", "reason": pause_reason}
 

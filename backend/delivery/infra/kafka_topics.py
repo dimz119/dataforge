@@ -3,6 +3,20 @@
 One topic in the MVP: `df.delivery.events.v1`, 12 partitions, delete cleanup,
 retention 6 h AND 5 GiB per partition, 256 KiB max message — values copied
 from the §9.1 topic table.
+
+**Sharding & partitions (Phase 11, scaling-strategy §2.3/§3).** The internal topic is
+**shared across all workspaces and shards** — there are zero per-workspace or per-shard
+topics (topic-per-tenant would explode partition count on a single broker). A multi-shard
+stream does NOT get dedicated partitions: every event is keyed by ``partition_key``
+(``{workspace_id}:{stream_id}:{entity_type}:{entity_key}``), so each *actor's* events land
+on one partition and stay ordered, and because actors are partitioned to disjoint shards by
+``shard_for_key`` (no two shards share an actor) a shard's keyspace is naturally disjoint at
+the broker. The partition COUNT is sized for aggregate fleet TPS, not shard count: 12 at GA
+(≥ 64 shards' worth of keyspace fits behind the workspace aggregate-TPS quota, §2.3), 48 at
+rung 5, 192 at rung 6. Partition growth happens **only via a new topic generation**
+(``…events.v2`` + consumer cutover), NEVER in-place ``kafka-topics --alter`` — in-place
+addition would remap key→partition mid-stream and break per-key ordering (§2.3). So this
+spec is intentionally static at 12; bumping it is a v2 topic, not an edit here.
 """
 
 from collections.abc import Sequence

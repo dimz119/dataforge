@@ -32,7 +32,7 @@ from uuid import UUID
 from django.db import transaction
 from django.utils import timezone
 
-from streams.application import audit, quotas
+from streams.application import audit, metering, quotas
 from streams.domain.models import (
     LC_CREATED,
     LC_FAILED,
@@ -44,7 +44,6 @@ from streams.domain.models import (
     LC_STOPPED,
     LC_STOPPING,
     MVP_SHARD_COUNT,
-    MVP_SHARD_ID,
     REASON_ERROR,
     REASON_FAILOVER_EXHAUSTED,
     REASON_IDLE,
@@ -82,6 +81,7 @@ __all__ = [
     "request_set_target_tps",
     "request_start",
     "request_stop",
+    "system_pause",
 ]
 
 # Re-exported for the API layer's except-clauses.
@@ -139,6 +139,9 @@ class StreamCreateInput:
     speed_multiplier: Any
     clock_mode: str
     backfill_days: int | None
+    # Pinned-at-start shard count (immutable, INV-STR-5; scaling-strategy §2.2).
+    # Defaults to the MVP single shard; the API caps it at the ≤ 64 platform limit.
+    shard_count: int = MVP_SHARD_COUNT
 
 
 @dataclass(frozen=True)
@@ -225,6 +228,11 @@ def create_stream(*, workspace: Any, data: StreamCreateInput, actor: Any) -> Str
     validate_pins(data.schema_version_pins, manifest=pin.merged_config)
     seed = data.seed if data.seed is not None else generate_seed()
     virtual_epoch = data.virtual_epoch or timezone.now()
+    # The shard count is pinned now and immutable for the life of the stream
+    # (INV-STR-5; scaling-strategy §2.2). The DB CHECK enforces 1..64 and the API
+    # caps at the ≤ 64 platform limit; defend the floor here so a missing default
+    # never writes a < 1 row that the supervisor's range() would silently skip.
+    shard_count = max(1, int(data.shard_count))
     with transaction.atomic():
         stream: Stream = Stream.objects.create(
             workspace=workspace,
@@ -247,15 +255,23 @@ def create_stream(*, workspace: Any, data: StreamCreateInput, actor: Any) -> Str
             speed_multiplier=data.speed_multiplier,
             clock_mode=data.clock_mode,
             backfill_days=data.backfill_days,
-            shard_count=MVP_SHARD_COUNT,
+            shard_count=shard_count,
             created_by=created_by,
         )
-        # Seed the MVP shard registry row (shard_id = 0); fencing_token starts at 0.
-        StreamShard.objects.create(
-            workspace=workspace,
-            stream_id=stream.id,
-            shard_id=MVP_SHARD_ID,
-            fencing_token=0,
+        # Seed one shard registry row per shard (shard_id = 0 … shard_count-1); each
+        # starts at fencing_token = 0. The runner acquires a per-shard lease + fence
+        # for every row (leases.acquire is per (stream, shard)); the single-shard MVP
+        # is shard_count = 1 → exactly the legacy one-row seed (shard_id = 0).
+        StreamShard.objects.bulk_create(
+            [
+                StreamShard(
+                    workspace=workspace,
+                    stream_id=stream.id,
+                    shard_id=shard_id,
+                    fencing_token=0,
+                )
+                for shard_id in range(shard_count)
+            ]
         )
         audit.emit(
             "streams.stream.created",
@@ -322,6 +338,9 @@ def request_start(*, stream: Stream, actor: Any) -> Stream:
             f"(legal only from created/stopped/failed; T2)"
         )
     quotas.check_start_allowed(stream)
+    # Platform admission (scaling §5): the new provisioned target_tps must fit the
+    # platform budget. Excludes this stream (not yet provisioned). 503 + Retry-After.
+    metering.check_admission(requested_tps=stream.target_tps, exclude_stream_id=stream.id)
     now = timezone.now()
     with transaction.atomic():
         stream.desired_state = RUN_RUNNING
@@ -451,7 +470,17 @@ def request_resume(*, stream: Stream, actor: Any) -> Stream:
         )
     if stream.status_reason == REASON_QUOTA:
         # T7 quota guard: resuming a quota-paused stream requires restored headroom.
+        # Both the synchronous caps (TPS/concurrent/aggregate) AND the events/day
+        # budget that triggered the pause must be back under the cap — a resume into
+        # an exhausted day re-pauses on the next tick, so it is rejected here.
         quotas.check_start_allowed(stream)
+        cap = quotas.events_per_day_cap(stream.workspace_id)
+        if metering.is_over_daily_quota(stream.workspace_id, cap):
+            raise quotas.StreamQuotaExceeded(
+                quota="events_per_day",
+                limit=cap,
+                requested=metering.events_consumed_today(stream.workspace_id),
+            )
     now = timezone.now()
     with transaction.atomic():
         stream.desired_state = RUN_RUNNING
@@ -495,6 +524,15 @@ def request_set_target_tps(*, stream: Stream, target_tps: int, actor: Any) -> St
         )
     if stream.target_tps == target_tps:
         return stream  # no-op: re-issuing the current desired target_tps
+    # Aggregate-TPS cap (PRD §7): the new value plus the workspace's other running
+    # streams must stay within the plan's aggregate ceiling (INV-TEN-5).
+    quotas.check_aggregate_tps_allowed(stream, target_tps=target_tps)
+    # Platform admission (scaling §5): only a RAISE adds new provisioned load —
+    # the delta over the stream's current provisioned target_tps. A lower or equal
+    # value frees capacity and is always admitted.
+    raise_delta = target_tps - stream.target_tps
+    if raise_delta > 0:
+        metering.check_admission(requested_tps=raise_delta, exclude_stream_id=stream.id)
     now = timezone.now()
     with transaction.atomic():
         previous = stream.target_tps
@@ -598,4 +636,53 @@ def mark_failed(
         _audit_lifecycle(
             "streams.stream.failed", stream, actor, extra={"reason": stream.status_reason}
         )
+    return stream
+
+
+# Lifecycle states a system pause (quota/idle) may fire from: a live, emitting
+# stream. A stream not running/converging is already not consuming and is skipped.
+_SYSTEM_PAUSABLE_FROM = frozenset({LC_RUNNING, LC_STARTING, LC_RESUMING})
+
+
+def system_pause(*, stream: Stream, reason: str) -> Stream:
+    """System-pause ``stream`` to ``paused_quota`` / ``paused_idle`` (P11-07).
+
+    The trigger path for both quota exhaustion (``reason="quota"``) and idle
+    auto-pause (``reason="idle"``) — NEVER a delete (INV-TEN-5: data is preserved).
+    Writes desired ``paused`` + the system ``status_reason`` (rendered as
+    ``paused_quota`` / ``paused_idle`` by :pyattr:`Stream.status`), nudges lifecycle
+    to ``pausing`` so the runner converges + checkpoints (T6), audits
+    ``streams.stream.system_paused {reason}`` with ``actor="system"`` in the same
+    transaction (INV-AUD-2), and bumps ``df_quota_pauses_total{reason}`` (M-3: the
+    only label is the bounded ``reason``). Idempotent: a stream already paused-desired
+    or not in a live state is a no-op returning current state.
+    """
+    if reason not in (REASON_QUOTA, REASON_IDLE):
+        raise ValueError(f"system_pause reason must be quota/idle, got {reason!r}")
+    if stream.desired_state == RUN_PAUSED:
+        return stream  # already paused-desired (INV-STR-3 no-op)
+    if stream.lifecycle_state not in _SYSTEM_PAUSABLE_FROM:
+        return stream  # not live → nothing to pause
+    now = timezone.now()
+    with transaction.atomic():
+        stream.desired_state = RUN_PAUSED
+        stream.lifecycle_state = LC_PAUSING  # runner converges → paused (T6)
+        stream.status_reason = reason
+        stream.last_transition_at = now
+        stream.updated_at = now
+        stream.save(
+            update_fields=[
+                "desired_state",
+                "lifecycle_state",
+                "status_reason",
+                "last_transition_at",
+                "updated_at",
+            ]
+        )
+        _audit_lifecycle(
+            "streams.stream.system_paused", stream, "system", extra={"reason": reason}
+        )
+    from observation.infra import metrics
+
+    metrics.quota_pauses_total.labels(reason=reason).inc()
     return stream

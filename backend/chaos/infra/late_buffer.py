@@ -169,6 +169,16 @@ class LateArrivalBuffer:
                 entry.resolved_at = now
                 entry.save(update_fields=["state", "resolved_at"])
                 count += 1
+        # df_chaos_reemissions_total{outcome} (§4 chaos family): one count per late
+        # -arrival buffer entry re-emitted, by outcome (emitted/flushed — a closed,
+        # bounded set, M-3 safe). Best-effort: a metrics error never breaks delivery.
+        if count:
+            try:
+                from observation.infra import metrics
+
+                metrics.chaos_reemissions_total.labels(outcome=outcome).inc(count)
+            except Exception:  # pragma: no cover - metrics must never break re-emission
+                pass
         return count
 
     def _pending_qs(self) -> Any:

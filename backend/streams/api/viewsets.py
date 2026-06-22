@@ -34,11 +34,12 @@ from config.problems import (
     NotFoundError,
     PermissionDeniedError,
     QuotaExceeded,
+    ServiceUnavailable,
 )
 from config.schema import page_envelope
 from identity.infra.jwt import DataForgeJWTAuthentication
 from streams.api import serializers
-from streams.application import quotas, services
+from streams.application import metering, quotas, services
 from streams.domain.models import Stream
 from tenancy.api.authentication import ApiKeyAuthentication, ApiKeyPrincipal
 from tenancy.api.middleware import arm_request_workspace
@@ -268,6 +269,11 @@ class StreamCollectionView(APIView):
             speed_multiplier=vclock.get("speed_multiplier") or Decimal("1.0"),
             clock_mode="live",  # v1 live mode only (backfill is the datasets resource)
             backfill_days=None,
+            # Shard count is pinned at start (immutable, INV-STR-5). The serializer
+            # bounds it 1..64 (the ≤ 64 platform shards/stream cap, scaling §5.2);
+            # there is no per-workspace shard quota in the MVP, so the platform cap is
+            # the only ceiling. Defaults to 1 (the single-shard layout).
+            shard_count=int(data.get("shard_count", 1)),
         )
         try:
             stream = services.create_stream(
@@ -336,6 +342,8 @@ class StreamDetailView(APIView):
                 raise QuotaExceeded(
                     str(exc), quota=exc.quota, limit=exc.limit, requested=exc.requested
                 ) from exc
+            except metering.AdmissionDenied as exc:
+                raise ServiceUnavailable(str(exc), retry_after=exc.retry_after) from exc
         if "name" in data:
             stream = services.request_rename(
                 stream=stream, name=str(data["name"]), actor=request.user
@@ -641,6 +649,8 @@ class StreamStartView(_LifecycleVerbView):
             raise QuotaExceeded(
                 str(exc), quota=exc.quota, limit=exc.limit, requested=exc.requested
             ) from exc
+        except metering.AdmissionDenied as exc:
+            raise ServiceUnavailable(str(exc), retry_after=exc.retry_after) from exc
         except services.StreamNotStartable as exc:
             raise InvalidStateTransition(str(exc)) from exc
         return _response(stream)

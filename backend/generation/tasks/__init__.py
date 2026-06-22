@@ -17,9 +17,18 @@ import uuid
 import structlog
 from celery import shared_task
 
+# Re-export the data-lifecycle beat tasks (P11-11) so Celery's
+# ``autodiscover_tasks(related_name="tasks")`` registers them when the
+# ``generation.tasks`` package is imported.
+from generation.tasks.archive import archive_ledger_partitions
+
 logger = structlog.get_logger(__name__)
 
-__all__ = ["enqueue_dataset_generation", "generate_dataset_task"]
+__all__ = [
+    "archive_ledger_partitions",
+    "enqueue_dataset_generation",
+    "generate_dataset_task",
+]
 
 
 @shared_task(
