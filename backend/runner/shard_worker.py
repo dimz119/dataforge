@@ -58,6 +58,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import structlog
 
+from config.logging import bind_log_context, emit_tick_summary, unbind_log_context
 from dataforge_engine.behavior import (
     Shard,
     ShardConfig,
@@ -65,6 +66,7 @@ from dataforge_engine.behavior import (
 )
 from dataforge_engine.behavior.scheduler import TokenBucket
 from generation.infra.clock import SystemWallClock
+from observation.infra import metrics
 from runner import lifecycle
 from runner.checkpoint_store import CheckpointStore, RestoredCheckpoint
 from runner.fencing import FencingError
@@ -216,18 +218,28 @@ class ShardWorker:
         immediately (a zombie writes zero rows post-takeover).
         """
         await self._setup()
+        # Bind tenant correlation so every downstream data-plane log line on this
+        # worker carries workspace/stream/shard (observability §3.1 / foundation).
+        bind_log_context(
+            workspace_id=self._workspace_id,
+            stream_id=self._stream_id,
+            shard_id=self._shard_id,
+        )
         await lifecycle.report_lifecycle(
             self._stream_id, lifecycle.RUNNING, workspace_id=self._workspace_id
         )
+        # LV-3 lifecycle transition (always emitted) instead of a raw INFO; the
+        # data-plane per-tick INFO is the LV-1 rolled-up summary (see _tick).
         logger.info(
             "shard.running",
             stream_id=self._stream_id,
             shard_id=self._shard_id,
             fencing_token=self._fencing_token,
         )
+        metrics.runner_streams_running.inc()
         try:
             while True:
-                stop = await self._tick()
+                stop = await self._timed_tick()
                 if stop:
                     return
                 await self._sleep_to_next_tick()
@@ -239,6 +251,35 @@ class ShardWorker:
                 fencing_token=self._fencing_token,
             )
             raise
+        finally:
+            metrics.runner_streams_running.dec()
+            unbind_log_context()
+
+    async def _timed_tick(self) -> bool:
+        """Run one tick under df_runner_tick_duration_seconds + overrun accounting.
+
+        Records the wall time of the §8.3 reconciliation tick (the M-5 inner-loop
+        histogram), flags df_runner_tick_overruns_total when a tick runs past its
+        1,000 ms budget (the fixed-cadence violation alerts watch), and emits the
+        LV-1 ``runner.tick.summary`` (≤ 1 INFO/stream/60 s — the only data-plane
+        INFO line, observability §2.2).
+        """
+        started = time.monotonic()
+        stop = await self._tick()
+        elapsed = time.monotonic() - started
+        metrics.runner_tick_duration_seconds.observe(elapsed)
+        if elapsed > self._tick_s:
+            metrics.runner_tick_overruns_total.inc()
+        emit_tick_summary(
+            logger,
+            stream_id=self._stream_id,
+            shard_id=self._shard_id,
+            ticks=self.ticks,
+            emitted_total=self.emitted_total,
+            tick_ms=round(elapsed * 1000, 1),
+            paused=self._paused,
+        )
+        return stop
 
     # -- setup (§8.3: load pin + LRU IR + checkpoint, build live shard) -----------
 
@@ -687,13 +728,52 @@ class ShardWorker:
         # 5-7. ledger BEFORE chaos, chaos transform + late buffer, publish.
         published = await self._emit(out)
 
-        # 8. stats.incr (Redis counters, INV-OBS-2).
+        # 8. stats.incr (Redis counters, INV-OBS-2) + events/day metering (P11-07).
         await lifecycle.incr_emitted(self._redis, self._stream_id, published)
         self.emitted_total += published
+        if published > 0 and self._workspace_id:
+            day_total = await lifecycle.incr_workspace_events_today(
+                self._redis, self._workspace_id, published
+            )
+            await self._maybe_quota_pause(day_total)
 
         # 9. checkpoint every 30 s (fenced; raises FencingError on a stale token).
         await self._maybe_checkpoint()
         return False
+
+    async def _maybe_quota_pause(self, day_total: int) -> None:
+        """System-pause this stream if its workspace crossed the events/day cap (P11-07).
+
+        The events/day exhaustion TRIGGER (PRD §7): once the workspace's UTC-day
+        total reaches its ``events_per_day`` cap, pause to ``paused_quota`` (NEVER a
+        delete — INV-TEN-5) so emission halts within the tick. The control-plane
+        write (desired ``paused`` + audit + ``df_quota_pauses_total``) runs in a
+        worker thread under the workspace-armed RLS scope (``system_pause`` opens its
+        own transaction). The cap read is best-effort: ``day_total == 0`` means the
+        Redis meter is degraded → fail-open (no pause). Idempotent: a stream already
+        paused-desired is a ``system_pause`` no-op, so the per-tick check is cheap.
+        """
+        if day_total <= 0:
+            return  # degraded meter (fail-open) — never pause on a counter miss
+        await asyncio.to_thread(self._quota_pause_if_over, day_total)
+
+    def _quota_pause_if_over(self, day_total: int) -> None:
+        """Blocking half of :meth:`_maybe_quota_pause` (runs in a worker thread)."""
+        import uuid as _uuid
+
+        from streams.application import quotas, services
+        from streams.domain.models import Stream
+        from tenancy.application.services import worker_workspace_scope
+
+        ws = _uuid.UUID(self._workspace_id)
+        cap = quotas.events_per_day_cap(ws)
+        if cap <= 0 or day_total < cap:
+            return
+        with worker_workspace_scope(ws):
+            stream = Stream.objects.filter(id=self._stream_id).first()
+            if stream is None:
+                return
+            services.system_pause(stream=stream, reason="quota")
 
     async def _generate_tick(self) -> list[Any]:
         """Step 4: paced generation up to the tick-end virtual instant.
@@ -735,6 +815,9 @@ class ShardWorker:
             out = await asyncio.to_thread(self._run_chaos, batch)
             # 7. publish the surviving/added in-line instances, keyed by partition_key.
             published += self._publisher.publish(out)
+            # df_generation_events_total{event_class}: count each published event by
+            # its CDC op (c/u/d/r) — a bounded label (4 values), M-3-safe (§4 runner).
+            self._count_generation(out)
         # 5b. the late-arrival scheduler: publish entries now due (§6.2). Re-emissions
         #     go through the publisher inside take_due; count them into the total.
         published += await self._take_due_late()
@@ -798,6 +881,21 @@ class ShardWorker:
             return contextlib.nullcontext()
         return worker_workspace_scope(_uuid.UUID(self._workspace_id))
 
+    @staticmethod
+    def _count_generation(batch: list[Any]) -> None:
+        """df_generation_events_total{event_class} per emitted event (op c/u/d/r).
+
+        ``op`` is the CDC operation class — a closed 4-value set, an admissible
+        bounded label (M-3 bans only workspace/stream/user/event ids). An envelope
+        without an ``op`` falls back to ``unknown`` (defensive; the engine always
+        stamps one).
+        """
+        for env in batch:
+            op = env.get("op") if hasattr(env, "get") else None
+            metrics.generation_events_total.labels(
+                event_class=str(op) if op else "unknown"
+            ).inc()
+
     def _append_ledger(self, batch: list[Any]) -> None:
         """Workspace-armed ledger append (the §4.2 RLS arming for the data plane).
 
@@ -813,12 +911,22 @@ class ShardWorker:
         from tenancy.application.services import worker_workspace_scope
 
         assert self._ledger is not None
-        if not self._workspace_id:
-            # No setup (unit test) → RLS is a SQLite no-op anyway; append unarmed.
-            self._ledger.append(batch)
-            return
-        with worker_workspace_scope(_uuid.UUID(self._workspace_id)):
-            self._ledger.append(batch)
+        # df_ledger_append_duration_seconds (M-5 inner-loop) + df_ledger_append_
+        # failures_total (§4 runner family). The append is the canonical-truth write
+        # (INV-GEN-5); a failure here is release-critical (the alert source).
+        started = time.monotonic()
+        try:
+            if not self._workspace_id:
+                # No setup (unit test) → RLS is a SQLite no-op anyway; append unarmed.
+                self._ledger.append(batch)
+            else:
+                with worker_workspace_scope(_uuid.UUID(self._workspace_id)):
+                    self._ledger.append(batch)
+        except Exception:
+            metrics.ledger_append_failures_total.inc()
+            raise
+        finally:
+            metrics.ledger_append_duration_seconds.observe(time.monotonic() - started)
 
     async def _maybe_checkpoint(self) -> None:
         """Step 9: periodic 30 s checkpoint via the fenced conditional write (§8.4)."""
@@ -830,6 +938,10 @@ class ShardWorker:
     async def _checkpoint(self) -> None:
         assert self._shard is not None and self._checkpoints is not None
         self._checkpoint_seq += 1
+        # df_checkpoint_duration_seconds (M-5 inner-loop): the fenced conditional
+        # write latency (§8.4). df_checkpoint_age_seconds is reset to 0 on a fresh
+        # commit; the supervisor/alert reads its growth (CheckpointStale ticket).
+        started = time.monotonic()
         await self._checkpoints.save(
             self._shard,
             fencing_token=self._fencing_token,
@@ -837,7 +949,10 @@ class ShardWorker:
             config_sha256=self._config_sha256,
             runtime=self._runtime_state(),
         )
-        self._last_checkpoint_at = time.monotonic()
+        now = time.monotonic()
+        metrics.checkpoint_duration_seconds.observe(now - started)
+        metrics.checkpoint_age_seconds.set(0)
+        self._last_checkpoint_at = now
 
     # -- reconcile branches ------------------------------------------------------
 

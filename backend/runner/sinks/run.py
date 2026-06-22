@@ -86,6 +86,7 @@ def build_buffer_writer_host(
         topics=[DELIVERY_TOPIC],
         deserialize=deserialize_internal,
         arm_tenant=_arm_tenant,
+        group=REST_BUFFER_GROUP,
     )
     logger.info(
         "buffer_writer.built",

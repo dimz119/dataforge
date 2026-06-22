@@ -1,0 +1,202 @@
+# DataForge SLO recording rules (Phase 11, P11-06).
+#
+# Computes the SLO-1/2/3 SLIs from the df_ metrics catalog (observability.md §4,
+# §7). All three SLIs are recorded as success RATIOS (good/total) over a set of
+# short-to-long windows; the burn-rate ALERT rules in slo-alerts.yml divide
+# (1 - ratio) by the budget (1 - target) to obtain the Google-SRE multiwindow
+# burn rate (§8).
+#
+# Window set per SLO: 5m, 1h, 6h, 24h, 3d — exactly the windows the multiwindow
+# alerts pair (1h&5m, 6h, 24h, 3d). The 30-day rolling SLO window (§7) is the
+# reporting/error-budget window surfaced on the SLO-burn dashboard via the
+# 30d-windowed ratios recorded here too.
+#
+# Conventions:
+#   - record name = sli:<slo>:ratio_rate<window>  (Prometheus naming convention:
+#     level:metric:operation). The recorded value is the GOOD fraction in [0,1].
+#   - SLO target constants live alongside as sli:<slo>:target so the alert rules
+#     and dashboards read one source of truth.
+#
+# Validated by yaml.safe_load (artifact-only; not run against a live Prometheus
+# in this phase per the build scope).
+
+groups:
+  # -----------------------------------------------------------------------
+  # SLO target constants (single source of truth; observability.md §7)
+  # -----------------------------------------------------------------------
+  - name: dataforge_slo_targets
+    rules:
+      # SLO-1 control-plane availability target 99.5%.
+      - record: sli:slo1_api_availability:target
+        expr: "0.995"
+      # SLO-2 data-plane delivery success target 99.0%.
+      - record: sli:slo2_delivery_success:target
+        expr: "0.99"
+      # SLO-3 WS connect success target 99.5%.
+      - record: sli:slo3_ws_connect:target
+        expr: "0.995"
+
+  # -----------------------------------------------------------------------
+  # SLO-1 — Control-plane API availability (observability.md §7.1)
+  #   SLI = good / total over /api/v1/* on web.
+  #   bad  = status >= 500. 4xx are GOOD (the API working as specified).
+  #   Source: df_http_requests_total{method,route,status}.
+  # The route label is the bounded URL pattern (M-3), and every /api/v1/*
+  # route pattern begins with "/api/v1". status is a string label; >=500 is
+  # matched with the =~"5.." regex on the leading digit family.
+  # -----------------------------------------------------------------------
+  - name: dataforge_slo1_api_availability
+    rules:
+      # ---- 5m ----
+      - record: sli:slo1_api_availability:ratio_rate5m
+        expr: |
+          1 - (
+            sum(rate(df_http_requests_total{route=~"/api/v1.*", status=~"5.."}[5m]))
+            /
+            sum(rate(df_http_requests_total{route=~"/api/v1.*"}[5m]))
+          )
+      # ---- 1h ----
+      - record: sli:slo1_api_availability:ratio_rate1h
+        expr: |
+          1 - (
+            sum(rate(df_http_requests_total{route=~"/api/v1.*", status=~"5.."}[1h]))
+            /
+            sum(rate(df_http_requests_total{route=~"/api/v1.*"}[1h]))
+          )
+      # ---- 6h ----
+      - record: sli:slo1_api_availability:ratio_rate6h
+        expr: |
+          1 - (
+            sum(rate(df_http_requests_total{route=~"/api/v1.*", status=~"5.."}[6h]))
+            /
+            sum(rate(df_http_requests_total{route=~"/api/v1.*"}[6h]))
+          )
+      # ---- 24h ----
+      - record: sli:slo1_api_availability:ratio_rate24h
+        expr: |
+          1 - (
+            sum(rate(df_http_requests_total{route=~"/api/v1.*", status=~"5.."}[24h]))
+            /
+            sum(rate(df_http_requests_total{route=~"/api/v1.*"}[24h]))
+          )
+      # ---- 3d ----
+      - record: sli:slo1_api_availability:ratio_rate3d
+        expr: |
+          1 - (
+            sum(rate(df_http_requests_total{route=~"/api/v1.*", status=~"5.."}[3d]))
+            /
+            sum(rate(df_http_requests_total{route=~"/api/v1.*"}[3d]))
+          )
+      # ---- 30d (reporting / error-budget window, §7) ----
+      - record: sli:slo1_api_availability:ratio_rate30d
+        expr: |
+          1 - (
+            sum(rate(df_http_requests_total{route=~"/api/v1.*", status=~"5.."}[30d]))
+            /
+            sum(rate(df_http_requests_total{route=~"/api/v1.*"}[30d]))
+          )
+      # ---- Companion latency SLIs (observability.md §7.1): 99% reads <500ms,
+      #      99% writes <1s, measured at the app via the duration histogram.
+      #      Recorded as the fraction within bound (le bucket / total).
+      - record: sli:slo1_api_read_latency_under_500ms:ratio_rate1h
+        expr: |
+          sum(rate(df_http_request_duration_seconds_bucket{method="GET", route=~"/api/v1.*", le="0.5"}[1h]))
+          /
+          sum(rate(df_http_request_duration_seconds_count{method="GET", route=~"/api/v1.*"}[1h]))
+      - record: sli:slo1_api_write_latency_under_1s:ratio_rate1h
+        expr: |
+          sum(rate(df_http_request_duration_seconds_bucket{method=~"POST|PUT|PATCH|DELETE", route=~"/api/v1.*", le="1"}[1h]))
+          /
+          sum(rate(df_http_request_duration_seconds_count{method=~"POST|PUT|PATCH|DELETE", route=~"/api/v1.*"}[1h]))
+
+  # -----------------------------------------------------------------------
+  # SLO-2 — Data-plane delivery success (observability.md §7.2)
+  #   SLI = fraction of delivered events visible to the REST cursor within 30s
+  #         of canonical emitted_at = (le="30" bucket) / (+Inf bucket).
+  #   Source: df_buffer_commit_lag_seconds histogram. The _BUCKETS_LAG set
+  #   (metrics.py) includes the le="30" boundary exactly, so the ratio is exact.
+  # -----------------------------------------------------------------------
+  - name: dataforge_slo2_delivery_success
+    rules:
+      # ---- 5m ----
+      - record: sli:slo2_delivery_success:ratio_rate5m
+        expr: |
+          sum(rate(df_buffer_commit_lag_seconds_bucket{le="30"}[5m]))
+          /
+          sum(rate(df_buffer_commit_lag_seconds_count[5m]))
+      # ---- 1h ----
+      - record: sli:slo2_delivery_success:ratio_rate1h
+        expr: |
+          sum(rate(df_buffer_commit_lag_seconds_bucket{le="30"}[1h]))
+          /
+          sum(rate(df_buffer_commit_lag_seconds_count[1h]))
+      # ---- 6h ----
+      - record: sli:slo2_delivery_success:ratio_rate6h
+        expr: |
+          sum(rate(df_buffer_commit_lag_seconds_bucket{le="30"}[6h]))
+          /
+          sum(rate(df_buffer_commit_lag_seconds_count[6h]))
+      # ---- 24h ----
+      - record: sli:slo2_delivery_success:ratio_rate24h
+        expr: |
+          sum(rate(df_buffer_commit_lag_seconds_bucket{le="30"}[24h]))
+          /
+          sum(rate(df_buffer_commit_lag_seconds_count[24h]))
+      # ---- 3d ----
+      - record: sli:slo2_delivery_success:ratio_rate3d
+        expr: |
+          sum(rate(df_buffer_commit_lag_seconds_bucket{le="30"}[3d]))
+          /
+          sum(rate(df_buffer_commit_lag_seconds_count[3d]))
+      # ---- 30d (reporting / error-budget window, §7) ----
+      - record: sli:slo2_delivery_success:ratio_rate30d
+        expr: |
+          sum(rate(df_buffer_commit_lag_seconds_bucket{le="30"}[30d]))
+          /
+          sum(rate(df_buffer_commit_lag_seconds_count[30d]))
+
+  # -----------------------------------------------------------------------
+  # SLO-3 — WebSocket connect success (observability.md §7.3)
+  #   SLI = accepted / (accepted + error + timeout) from df_ws_connect_total.
+  #   auth_failed and quota_rejected are EXCLUDED from the denominator — they
+  #   are correct rejections.
+  #   Source: df_ws_connect_total{result=accepted/auth_failed/quota_rejected/error/timeout}.
+  # -----------------------------------------------------------------------
+  - name: dataforge_slo3_ws_connect
+    rules:
+      # ---- 5m ----
+      - record: sli:slo3_ws_connect:ratio_rate5m
+        expr: |
+          sum(rate(df_ws_connect_total{result="accepted"}[5m]))
+          /
+          sum(rate(df_ws_connect_total{result=~"accepted|error|timeout"}[5m]))
+      # ---- 1h ----
+      - record: sli:slo3_ws_connect:ratio_rate1h
+        expr: |
+          sum(rate(df_ws_connect_total{result="accepted"}[1h]))
+          /
+          sum(rate(df_ws_connect_total{result=~"accepted|error|timeout"}[1h]))
+      # ---- 6h ----
+      - record: sli:slo3_ws_connect:ratio_rate6h
+        expr: |
+          sum(rate(df_ws_connect_total{result="accepted"}[6h]))
+          /
+          sum(rate(df_ws_connect_total{result=~"accepted|error|timeout"}[6h]))
+      # ---- 24h ----
+      - record: sli:slo3_ws_connect:ratio_rate24h
+        expr: |
+          sum(rate(df_ws_connect_total{result="accepted"}[24h]))
+          /
+          sum(rate(df_ws_connect_total{result=~"accepted|error|timeout"}[24h]))
+      # ---- 3d ----
+      - record: sli:slo3_ws_connect:ratio_rate3d
+        expr: |
+          sum(rate(df_ws_connect_total{result="accepted"}[3d]))
+          /
+          sum(rate(df_ws_connect_total{result=~"accepted|error|timeout"}[3d]))
+      # ---- 30d (reporting / error-budget window, §7) ----
+      - record: sli:slo3_ws_connect:ratio_rate30d
+        expr: |
+          sum(rate(df_ws_connect_total{result="accepted"}[30d]))
+          /
+          sum(rate(df_ws_connect_total{result=~"accepted|error|timeout"}[30d]))

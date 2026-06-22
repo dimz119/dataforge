@@ -106,6 +106,8 @@ class BufferWriterChannel:
         except _WorkspaceMismatch as exc:
             return self._fatal_contract("workspace_id mismatch (SINK-7)", exc)
 
+        from observation.infra import metrics
+
         store = self._store_for(batch)
         try:
             result = store.write_batch(delivered)
@@ -114,6 +116,7 @@ class BufferWriterChannel:
             # (SINK-8/9); the host pauses + retries the same offsets — no loss.
             self._healthy = False
             self._health_detail = f"write failed: {exc}"
+            metrics.buffer_writes_total.labels(result="backpressure").inc()
             logger.warning(
                 "buffer_writer.write_failed",
                 stream_id=str(batch.stream_id),
@@ -127,6 +130,13 @@ class BufferWriterChannel:
 
         self._healthy = True
         self._health_detail = ""
+        # df_buffer_writes_total{result} + df_buffer_write_batch_size (§4 buffer
+        # family). SLO-2 source: df_buffer_commit_lag_seconds is the per-event delay
+        # from canonical emitted_at to buffer visibility, measured AFTER the txn
+        # committed (BW-3) so the bucket ratio is the true freshness SLI.
+        metrics.buffer_writes_total.labels(result="ok").inc()
+        metrics.buffer_write_batch_size.observe(result.rows_written)
+        self._observe_commit_lag(delivered, metrics)
         # StreamStats: the buffer-writer is the canonical counting point (observability
         # §5) — count exactly the rows now durable in event_buffer, AFTER the commit,
         # so the Redis tally reconciles byte-for-byte with REST replay (the XCH exit
@@ -166,6 +176,34 @@ class BufferWriterChannel:
                 )
             delivered.append(strip_internal(env))  # SB-2: exactly once at ingest
         return delivered
+
+    @staticmethod
+    def _observe_commit_lag(
+        delivered: list[DeliveredEnvelope], metrics: Any
+    ) -> None:
+        """df_buffer_commit_lag_seconds: ``persisted_at`` minus ``emitted_at`` (SLO-2).
+
+        The commit happened (this runs only on the ``ok`` path), so ``now()`` is the
+        moment the rows became REST-visible (``persisted_at``); the per-event delay
+        from the canonical ``emitted_at`` is the SLO-2 delivery-freshness SLI (the
+        ≤30 s bucket ratio is the budget). ``emitted_at`` is RFC 3339 UTC with 6
+        fractional digits (envelope-model timestamps). An unparseable timestamp is
+        skipped — the SLI never gates a durable write.
+        """
+        from datetime import UTC, datetime
+
+        now = datetime.now(UTC)
+        for env in delivered:
+            raw = env.get("emitted_at")
+            if not isinstance(raw, str):
+                continue
+            try:
+                emitted = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            lag = (now - emitted).total_seconds()
+            if lag >= 0:
+                metrics.buffer_commit_lag_seconds.observe(lag)
 
     def _store_for(self, batch: DeliveryBatch) -> BufferStore:
         key = str(batch.stream_id)

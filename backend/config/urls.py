@@ -12,7 +12,7 @@ from chaos.api.urls import urlpatterns as chaos_urlpatterns
 from delivery.api.urls import urlpatterns as delivery_urlpatterns
 from generation.api.urls import urlpatterns as generation_urlpatterns
 from identity.api.urls import urlpatterns as identity_urlpatterns
-from observation.api.health import healthz, readyz
+from observation.api.health import healthz, metrics_view, readyz
 from registry.api.urls import urlpatterns as registry_urlpatterns
 from streams.api.urls import urlpatterns as streams_urlpatterns
 from tenancy.api.urls import urlpatterns as tenancy_urlpatterns
@@ -32,5 +32,6 @@ api_v1_patterns = [
 urlpatterns = [
     path("healthz", healthz, name="healthz"),
     path("readyz", readyz, name="readyz"),
+    path("metrics", metrics_view, name="metrics"),
     path("api/v1/", include((api_v1_patterns, "v1"))),
 ]

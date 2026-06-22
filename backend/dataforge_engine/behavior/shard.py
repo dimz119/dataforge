@@ -23,6 +23,7 @@ from dataforge_engine.seeds import SeedTree
 from .background import US_PER_DAY, BackgroundMutationDriver
 from .clock import VirtualClock
 from .interpreter import Interpreter
+from .partitioning import owns_key
 from .pools import EntityPools
 from .rng import Cursor, UuidBits, traversal_rng
 from .runtime import Traversal
@@ -247,6 +248,8 @@ class Shard:
             self._ir, self._pools, self._tree, self._vclock, self._identity,
             self._sequence, emitted_at=emitted_at,
             overrides=self._config.catalog_overrides,
+            shard_id=self._config.shard_id,
+            shard_count=self._config.shard_count,
         )
         self._schedule_first_arrival()
         self._schedule_background_day(0)
@@ -358,7 +361,17 @@ class Shard:
         return []  # the session's first event comes from its own dwell timer
 
     def _bind_actor(self, arrival_index: int) -> str | None:
-        """BE-A1: index i₀ = ⌊u.N⌋ then circular scan to first eligible actor."""
+        """BE-A1: index i₀ = ⌊u.N⌋ then circular scan to first eligible actor.
+
+        Eligibility is ``status == "live"`` AND ``not in_session`` AND — under a
+        multi-shard split — **owned by this shard** (``owns_key``). The owning-shard
+        predicate makes each shard drive a disjoint actor population, so no two shards
+        ever generate sessions for the same actor (no cross-shard duplication of a
+        lifecycle); the per-shard gapless ``sequence_no`` (INV-GEN-7) is therefore over
+        a clean partition of the catalog. The ``i₀`` draw is over the *full* registry
+        (the bind cursor's draw count is shard-independent), so at ``shard_count == 1``
+        the scan is byte-for-byte the legacy path (``owns_key`` is always true).
+        """
         registry = self._pools.pool(self._ir.actor_entity).creation_order
         n = len(registry)
         if n == 0:
@@ -367,12 +380,19 @@ class Shard:
             self._tree.key("transitions", f"bind:{self._config.shard_id}:{arrival_index}")
         )
         i0 = int(bind_cursor.u64() % n)
+        shard_count = self._config.shard_count
+        shard_id = self._config.shard_id
         for offset in range(n):
             key = registry[(i0 + offset) % n]
             record = self._pools.get(self._ir.actor_entity, key)
-            if record is not None and record.status == "live" and not record.in_session:
+            if (
+                record is not None
+                and record.status == "live"
+                and not record.in_session
+                and owns_key(key, shard_id=shard_id, shard_count=shard_count)
+            ):
                 return key
-        return None  # all in session ⇒ deterministic drop (BE-A3)
+        return None  # all in session / none owned by this shard ⇒ deterministic drop (BE-A3)
 
     def _start_session(self, actor_key: str, v: int) -> None:
         machine = self._ir.machines[self._ir.session_machine]

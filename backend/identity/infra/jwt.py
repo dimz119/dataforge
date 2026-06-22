@@ -17,9 +17,24 @@ from rest_framework_simplejwt.exceptions import AuthenticationFailed
 from rest_framework_simplejwt.tokens import RefreshToken
 
 if TYPE_CHECKING:
+    from rest_framework.request import Request
     from rest_framework_simplejwt.tokens import Token
 
     from identity.domain.models import User
+
+
+def _record_jwt_auth_failure(reason: str) -> None:
+    """df_auth_failures_total{mechanism=jwt,reason} (observability §4; AuthFailureSpike).
+
+    ``reason`` is a closed slug (never the token, M-3 / redaction). Best-effort — a
+    metrics failure must never turn an auth rejection into a 500.
+    """
+    try:
+        from observation.infra import metrics
+
+        metrics.auth_failures_total.labels(mechanism="jwt", reason=reason).inc()
+    except Exception:  # pragma: no cover - metrics must never break auth
+        pass
 
 
 def issue_token_pair(user: User) -> RefreshToken:
@@ -47,6 +62,19 @@ class DataForgeJWTAuthentication(JWTAuthentication):
     shared handler's `authentication-required` 401 (security §3.3 row 1);
     SimpleJWT's `InvalidToken`/`AuthenticationFailed` both map there.
     """
+
+    def authenticate(self, request: Request) -> tuple[AbstractBaseUser, Token] | None:  # type: ignore[override]
+        """Authenticate, recording df_auth_failures_total{mechanism=jwt} on rejection.
+
+        A missing/absent Authorization header returns ``None`` (defer, not a failure);
+        an invalid/expired/tombstoned token raises — counted once as a jwt failure
+        with the closed reason slug (never the token value, M-3).
+        """
+        try:
+            return super().authenticate(request)
+        except AuthenticationFailed as exc:
+            _record_jwt_auth_failure(getattr(exc, "default_code", None) or "invalid_token")
+            raise
 
     def get_user(self, validated_token: Token) -> AbstractBaseUser:  # type: ignore[override]
         user: AbstractBaseUser = super().get_user(validated_token)

@@ -445,3 +445,40 @@ jobs:
       - uses: actions/checkout@v4
       - name: Tree matches D19 (project-folder-structure.md)
         run: python3 infra/scripts/folder_lint.py
+
+  # Dependency-vulnerability scan (GA-SECURITY-CHECKLIST item 13; security-architecture
+  # §13.1 Phase-1 "Trivy", SEC-DEP-4, TM-7 supply-chain). A Trivy filesystem scan over
+  # the whole repo picks up BOTH lockfiles — the backend `uv.lock`/`pyproject.toml` and
+  # the frontend `package-lock.json` — and fails the PR on any HIGH/CRITICAL advisory.
+  # This is a SECURITY gate, so (like folder-lint and the external GitGuardian secret
+  # scan) it runs on EVERY PR and push regardless of the path filter — a vuln can land
+  # via a lockfile change that the backend/frontend path filters would otherwise miss.
+  #   * `severity: HIGH,CRITICAL` + `exit-code: '1'` — only High/Critical fail the build.
+  #   * `ignore-unfixed: true` — DOCUMENTED choice: advisories with no upstream fix
+  #     available must not block GA (we cannot patch what upstream has not fixed). They
+  #     are surfaced in the report but do not gate; the gate re-arms automatically once a
+  #     fix ships. Unpatchable-but-relevant findings are tracked operationally, not here.
+  #   * `.trivyignore` (committed at repo root) is the tunable exception file — any
+  #     time-boxed CVE waiver lives there with a justification + expiry comment.
+  # The vulnerability DB download is cached by the action itself.
+  dependency-scan:
+    name: dependency-scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Trivy filesystem scan (deps; fail on HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          trivyignores: .trivyignore
+          # Scan dependency manifests + lockfiles (backend uv.lock/pyproject,
+          # frontend package-lock.json) and the filesystem; skip the heavy vendored
+          # node_modules tree if checked out (lockfile is the source of truth).
+          skip-dirs: frontend/node_modules
+        env:
+          # Mirror the action's defaults explicitly so a future bump is unambiguous.
+          TRIVY_DB_REPOSITORY: ghcr.io/aquasecurity/trivy-db:2

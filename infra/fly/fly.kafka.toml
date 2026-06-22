@@ -1,0 +1,66 @@
+# DataForge — internal-only Kafka broker app (deployment-architecture.md §3.4,
+# ADR-0015). A SEPARATE Fly app (`dataforge-kafka`) in the SAME org/6PN network
+# so the backend apps reach it ONLY as `dataforge-kafka.internal:9092`.
+#
+# D-4: internal Kafka is invisible infrastructure. NO PUBLIC IP is allocated
+# (`fly ips list` must be empty; never run `fly ips allocate-v4/-v6` for this
+# app). The broker is single-node KRaft (combined broker+controller, RF=1) —
+# an honest MVP weakest link (§9.4, §11); the managed-Kafka migration trigger
+# is pre-committed (§4).
+#
+# ARTIFACT-ONLY for Phase 11: reviewed, not deployed (USER-DECIDED SCOPE). It
+# parses as TOML and matches §3.4 verbatim.
+#
+# SECRETS RULE S-2: no secret values here. CLUSTER_ID is a fixed non-secret
+# constant (a KRaft format id, NOT a credential) set via `fly secrets set` only
+# because it must be stable across restarts and is awkward to inline; the value
+# is generated once with `kafka-storage.sh random-uuid` and documented in
+# infra/deploy/README.md as a NAME, not a value. PLAINTEXT on the org-private
+# 6PN (WireGuard-encrypted) for MVP; SASL/ACL arrive with the managed cluster
+# (Phase 12, security-architecture.md).
+
+app = "dataforge-kafka"
+primary_region = "iad"
+
+[build]
+  image = "apache/kafka:3.7.0"
+
+# Single-node KRaft, combined broker+controller. Listeners:
+#   BROKER://[6pn]:9092      — the only listener app services use
+#   CONTROLLER://[6pn]:9093  — controller quorum, local only
+# Advertised as dataforge-kafka.internal:9092 over the 6PN. No HOST listener:
+# there is no dev-tooling port in prod (D-4). The advertised host is the Fly
+# 6PN DNS name; CLUSTER_ID comes from `fly secrets` (see header) so re-up never
+# reformats the volume.
+[env]
+  KAFKA_NODE_ID = "1"
+  KAFKA_PROCESS_ROLES = "broker,controller"
+  KAFKA_CONTROLLER_LISTENER_NAMES = "CONTROLLER"
+  KAFKA_CONTROLLER_QUORUM_VOTERS = "1@localhost:9093"
+  KAFKA_LISTENERS = "BROKER://[::]:9092,CONTROLLER://[::]:9093"
+  KAFKA_ADVERTISED_LISTENERS = "BROKER://dataforge-kafka.internal:9092"
+  KAFKA_INTER_BROKER_LISTENER_NAME = "BROKER"
+  KAFKA_LISTENER_SECURITY_PROTOCOL_MAP = "BROKER:PLAINTEXT,CONTROLLER:PLAINTEXT"
+  KAFKA_AUTO_CREATE_TOPICS_ENABLE = "false"
+  KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR = "1"
+  KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR = "1"
+  KAFKA_LOG_DIRS = "/var/lib/kafka/data"
+
+# 100 GB local-NVMe volume; KAFKA_LOG_DIRS lives on it. Delivery-topic retention
+# (retention.ms=6h AND retention.bytes=5GiB/partition × 12 partitions ⇒ ≤60 GiB,
+# ≤60% of the volume) is set by `provision_kafka_topics`, not here. Create the
+# volume once with: fly volumes create kafkadata --size 100 --region iad
+[mounts]
+  source = "kafkadata"
+  destination = "/var/lib/kafka/data"
+
+[[vm]]
+  size = "performance-2x"
+  memory = "4096mb"
+
+# No [http_service]/[[services]] with public ports: the broker is internal-only.
+# Health is checked over the private network by the runner/worker readyz probes
+# (Kafka non-gating, observability §6.1) and the KafkaBrokerDown alert
+# (df_kafka_broker_up==0 from ≥2 procs, observability §9). A JMX→Prometheus
+# sidecar (§3.4 Monitoring) exposes broker metrics on the private network; wire
+# it as a second process here when the sidecar image is pinned.

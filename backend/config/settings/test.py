@@ -9,6 +9,11 @@ SECRET_KEY = "test-only-secret-key"
 
 DEBUG = False
 
+# Disable the background metrics HTTP exposer in tests (observability §4): the
+# /metrics route is still served and the registry still records, but no process
+# binds DF_METRICS_PORT so parallel suites never collide on the port.
+DF_METRICS_PORT = 0
+
 # Tests run without live services: in-memory SQLite, in-memory broker, eager tasks.
 DATABASES = {
     "default": {

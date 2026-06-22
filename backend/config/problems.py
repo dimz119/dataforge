@@ -358,6 +358,29 @@ class RateLimited(ProblemException):
         super().__init__(detail, headers=headers, extensions=extensions, **kwargs)
 
 
+# --- 503 -------------------------------------------------------------------
+class ServiceUnavailable(ProblemException):
+    """503 — platform admission control refused new provisioned load (scaling §5).
+
+    A ``start`` / ``target_tps`` raise that would push Σ provisioned ``target_tps``
+    across running streams over the platform budget (70 % of measured capacity) is
+    refused here so the platform protects its already-running tenants; the request is
+    retryable once load drains, so it carries ``Retry-After`` (default 300 s).
+    Running streams are never affected by this rejection.
+    """
+
+    status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    default_detail = "The platform is at capacity; retry after the indicated delay."
+    slug = Slug.SERVICE_UNAVAILABLE
+
+    def __init__(self, detail: str | None = None, *, retry_after: int = 300, **kwargs: Any) -> None:
+        headers = {"Retry-After": str(retry_after)}
+        headers.update(kwargs.pop("headers", {}) or {})
+        extensions = dict(kwargs.pop("extensions", {}) or {})
+        extensions["retry_after_seconds"] = retry_after
+        super().__init__(detail, headers=headers, extensions=extensions, **kwargs)
+
+
 __all__ = [
     "PROBLEM_BASE",
     "AmbiguousCredentials",
@@ -377,5 +400,6 @@ __all__ = [
     "ProblemException",
     "QuotaExceeded",
     "RateLimited",
+    "ServiceUnavailable",
     "Slug",
 ]

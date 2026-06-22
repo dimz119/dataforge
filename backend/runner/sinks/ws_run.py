@@ -58,6 +58,7 @@ def build_ws_pusher_host(
         topics=[DELIVERY_TOPIC],
         deserialize=deserialize_internal,
         arm_tenant=None,  # no DB write → no RLS to arm (§8.6)
+        group=WEBSOCKET_GROUP,
     )
     logger.info(
         "ws_pusher.built",

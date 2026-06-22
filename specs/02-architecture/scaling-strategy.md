@@ -189,7 +189,7 @@ Utilization: generation 1/2,500 = 0.04% of one shard; Kafka 1.25 KiB/s; buffer 1
 - Buffer-writer: 1,000 rows/s = 7% of one process. PG throughput: 20% of the 4-vCPU comfort ceiling.
 - **Storage: the named bottleneck.** 86.4M rows/day ⇒ buffer 124 GB/day + ledger hot 140 GB/day; 48 h tiers ⇒ ~530 GB steady state on PG (plus ~140 GB Parquet cold tier on object storage) against a 500 GB GA volume.
 - Remedy: extend the MPG volume to 1 TB (one-step scale), rely on the already-designed 48 h ledger tiering to Parquet (deployment §9.3) and partition-drop retention; add PgBouncer ahead of connection-pool growth (§2.7). Duty-cycle reality (classrooms don't run 24/7) makes this rung cheaper in practice, but the sizing above survives 100% duty.
-- This rung is the GA load-test floor's neighborhood: the Phase 11 exit criterion (≥ 5,000 aggregate TPS sustained with zero integrity/isolation violations) proves the platform clears this rung with 5× headroom on generation and Kafka — storage is the component the load test exercises least, which is why its remedy is provisioned, not deferred.
+- This rung is the GA load-test floor's neighborhood: the Phase 11 exit criterion (≥ 5,000 aggregate TPS sustained with zero integrity/isolation violations) proves the platform clears this rung with 5× headroom on generation and Kafka — storage is the component the load test exercises least, which is why its remedy is provisioned, not deferred. The measured reconciliation of these staircase rungs against the harness is published in the [Measured-Ceiling Report](../../infra/loadtest/MEASURED-CEILING-REPORT.md): its §3 numbers are the **reduced-scale local proof** that the harness, integrity sampler, and cross-tenant probes work end to end (the prod 5,000-TPS gate is skipped per the Phase-11 simulate-infra scope), not a production 5k claim.
 
 ### 3.5 Rung 5 — 10,000 TPS
 
@@ -353,7 +353,7 @@ The staircase is falsifiable; Phase 11 tests it ([../07-plan/phases/phase-11-sca
 4. **Saturation probe:** push past admission control to observe the designed failure mode (503s, throttling) rather than discover an undesigned one.
 5. **Continuous regression gate:** CI tracks the golden-manifest dry-run `est_eps_per_shard`; a > 15% regression versus baseline fails the build — capacity rot is caught at the PR, not the postmortem.
 
-Published artifact: the GA load-test report containing measured values beside every planning number in §2, and the updated staircase. That report — numbers, not vibes — is what the Phase 11 exit criterion means by "published with the arithmetic staircase to 100k."
+Published artifact: the GA load-test report containing measured values beside every planning number in §2, and the updated staircase. That report — numbers, not vibes — is what the Phase 11 exit criterion means by "published with the arithmetic staircase to 100k." The published instance lives at [`infra/loadtest/MEASURED-CEILING-REPORT.md`](../../infra/loadtest/MEASURED-CEILING-REPORT.md); per the Phase-11 simulate-infra scope its §3 carries the **reduced-scale local** measurements (harness + samplers proven end to end) rather than the prod 5,000-TPS gate, which is deferred to a live Fly deploy.
 
 ---
 

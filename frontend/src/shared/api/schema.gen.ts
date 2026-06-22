@@ -580,7 +580,7 @@ export interface paths {
       path?: never;
       cookie?: never;
     };
-    /** @description GET /streams/{stream_id}/events — the REST cursor pull (api-spec §4.9.1; §5). */
+    /** @description Pull a page of delivered events by opaque cursor. **Ordering is per `partition_key`**: all events for one partition entity (an actor and its CDC) are delivered in a stable, replay-consistent order. For a multi-shard stream actors are partitioned to disjoint shards by a stable hash of their key, so one actor's events always come from one shard; **cross-shard interleaving is unordered** — there is no global total order over a stream. `shard_count` is pinned at stream start and immutable. */
     get: operations['streams_events'];
     put?: never;
     post?: never;
@@ -1535,6 +1535,8 @@ export interface components {
       seed?: string | null;
       /** @default 10 */
       target_tps: number;
+      /** @default 1 */
+      shard_count: number;
       chaos?: {
         [key: string]: unknown;
       };

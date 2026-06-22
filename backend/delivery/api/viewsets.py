@@ -53,13 +53,33 @@ def _uuid(raw: str) -> uuid.UUID:
 
 
 class StreamEventsView(APIView):
-    """GET /streams/{stream_id}/events — the REST cursor pull (api-spec §4.9.1; §5)."""
+    """GET /streams/{stream_id}/events — the REST cursor pull (api-spec §4.9.1; §5).
+
+    **Ordering semantics (sharding, scaling-strategy §2.2/§3).** Events are ordered
+    **per ``partition_key``** — all events for one partition entity (an actor and its
+    CDC, PK-1..3, event-model §2.2.3) are delivered in a stable, replay-consistent
+    order. A multi-shard stream (``shard_count > 1``) partitions actors to disjoint
+    shards by a stable hash of their primary key, so each actor's events always come
+    from one shard; **across shards the interleaving is unordered** — there is no
+    global total order over a stream, only per-``partition_key`` order. The cursor is
+    opaque and replay-stable within that contract (RC-7); ``shard_count`` is pinned at
+    stream start and never changes, so an actor's partition assignment is immutable.
+    """
 
     authentication_classes: list[type] = [ApiKeyAuthentication, DataForgeJWTAuthentication]
     permission_classes = [IsAuthenticated]
 
     @extend_schema(
         operation_id="streams_events",
+        description=(
+            "Pull a page of delivered events by opaque cursor. **Ordering is per "
+            "`partition_key`**: all events for one partition entity (an actor and its "
+            "CDC) are delivered in a stable, replay-consistent order. For a multi-shard "
+            "stream actors are partitioned to disjoint shards by a stable hash of their "
+            "key, so one actor's events always come from one shard; **cross-shard "
+            "interleaving is unordered** — there is no global total order over a stream. "
+            "`shard_count` is pinned at stream start and immutable."
+        ),
         parameters=[
             OpenApiParameter("cursor", str, description="Opaque resume cursor (RC-7)."),
             OpenApiParameter(
@@ -100,17 +120,28 @@ class StreamEventsView(APIView):
             entity_type=validated.get("entity_type"),
             entity_key=validated.get("entity_key"),
         )
+        from observation.infra import metrics
+
         try:
             page = services.read_events(query)
         except services.CursorInvalidError as exc:
             raise CursorInvalid(str(exc)) from exc
         except services.CursorExpiredError as exc:
+            # df_cursor_expired_total: a 410 cursor-expired (retention window passed,
+            # observability §4 web family / CursorExpiredSpike ticket alert source).
+            metrics.cursor_expired_total.inc()
             raise CursorExpired(
                 earliest_cursor=exc.earliest_cursor,
                 retention_hours=exc.retention_hours,
             ) from exc
 
-        return Response({"data": list(page.data), "next_cursor": page.next_cursor})
+        rows = list(page.data)
+        # df_events_served_total{channel=rest}: the bulk cursor-pull path (limit caps
+        # at 1000, §5.1; SLO-2 / delivery-throughput source). Counts events actually
+        # returned to the consumer this page.
+        if rows:
+            metrics.events_served_total.labels(channel="rest").inc(len(rows))
+        return Response({"data": rows, "next_cursor": page.next_cursor})
 
     # -- auth + masking (security §3.3; RC-5) -----------------------------------
 

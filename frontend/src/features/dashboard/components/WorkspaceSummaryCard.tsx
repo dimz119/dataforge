@@ -1,11 +1,21 @@
-import { Skeleton } from '../../../shared/ui';
-import type { StreamResponse, Workspace } from '../../../shared/api/types';
+import { QuotaMeter, Skeleton } from '../../../shared/ui';
+import type {
+  StreamResponse,
+  Workspace,
+  WorkspaceQuotaUsage,
+} from '../../../shared/api/types';
 
 export interface WorkspaceSummaryCardProps {
   workspace?: Workspace;
   streams: StreamResponse[];
   /** Events today, summed from per-stream stats (`total_events`). */
   eventsToday: number;
+  /**
+   * Live quota limits + usage (P11). When present, the QuotaMeter bars render
+   * (events/day, aggregate TPS, concurrent streams vs the plan caps). Absent while
+   * the quota query is loading or errored — the card degrades to usage numbers only.
+   */
+  quotas?: WorkspaceQuotaUsage;
   isLoading?: boolean;
 }
 
@@ -39,14 +49,16 @@ function Stat({ label, value, hint }: StatProps) {
 
 /**
  * Workspace summary (frontend-architecture §9.2). Shows member count, plan tier,
- * events today, and active streams as USAGE NUMBERS WITHOUT LIMIT BARS — the
- * `QuotaMeter` bars (events/day, aggregate TPS vs caps) land in Phase 11 once quota
- * enforcement exists.
+ * events today, and active streams as usage numbers, plus the Phase-11 `QuotaMeter`
+ * bars (events/day, aggregate TPS, concurrent streams vs the plan caps) when the
+ * quota usage is available. The console is a UX surface — the API is the enforcement
+ * point; the bars mirror the live `used`/`limit` the quota endpoint reports.
  */
 export function WorkspaceSummaryCard({
   workspace,
   streams,
   eventsToday,
+  quotas,
   isLoading,
 }: WorkspaceSummaryCardProps) {
   if (isLoading || !workspace) {
@@ -67,7 +79,7 @@ export function WorkspaceSummaryCard({
         Workspace summary
       </h2>
       <dl className="grid grid-cols-2 gap-5 sm:grid-cols-4">
-        <Stat label="Plan" value={workspace.plan} hint="usage shown; limits in Phase 11" />
+        <Stat label="Plan" value={workspace.plan} hint="plan-tier quotas below" />
         <Stat
           label="Members"
           value={workspace.member_count.toLocaleString('en-US')}
@@ -79,7 +91,28 @@ export function WorkspaceSummaryCard({
           hint={`${streams.length.toLocaleString('en-US')} total`}
         />
       </dl>
-      {/* Phase 11: QuotaMeter bars (events/day, aggregate TPS vs caps) render here. */}
+
+      {/* P11 QuotaMeter bars: events/day, aggregate TPS, concurrent streams vs caps. */}
+      {quotas && (
+        <div className="mt-5 grid gap-4 border-t border-border pt-5 sm:grid-cols-3">
+          <QuotaMeter
+            label="Events / day"
+            used={quotas.events_per_day.used ?? 0}
+            limit={quotas.events_per_day.limit}
+          />
+          <QuotaMeter
+            label="Aggregate TPS"
+            used={quotas.aggregate_tps_cap.used ?? 0}
+            limit={quotas.aggregate_tps_cap.limit}
+            unit="TPS"
+          />
+          <QuotaMeter
+            label="Concurrent streams"
+            used={quotas.concurrent_streams.used ?? 0}
+            limit={quotas.concurrent_streams.limit}
+          />
+        </div>
+      )}
     </section>
   );
 }

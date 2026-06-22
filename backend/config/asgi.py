@@ -24,11 +24,17 @@ django.setup()
 
 from channels.routing import ProtocolTypeRouter, URLRouter  # noqa: E402
 from channels.security.websocket import AllowedHostsOriginValidator  # noqa: E402
+from django.conf import settings  # noqa: E402
 from django.core.asgi import get_asgi_application  # noqa: E402
 
 from config.ws_routing import websocket_urlpatterns  # noqa: E402
+from observation.infra import metrics  # noqa: E402
 
 _django_asgi_app = get_asgi_application()
+
+# The ws group serves WebSockets, not REST, so its df_ws_* metrics are exposed on a
+# side port (DF_METRICS_PORT) like the runner/worker groups (observability §4).
+metrics.start_metrics_server(settings.DF_METRICS_PORT)
 
 application = ProtocolTypeRouter(
     {

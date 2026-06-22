@@ -37,6 +37,7 @@ import structlog
 from aiohttp import web
 from django.conf import settings
 
+from observation.infra import metrics
 from runner.leases import LeaseManager, ShardKey
 from runner.publisher import DELIVERY_TOPIC, EventPublisher, build_kafka_producer
 from runner.shard_worker import ShardWorker
@@ -225,12 +226,31 @@ class Supervisor:
             return  # NX-blocked: another runner won the race this scan
         self._admission.register(shard, desired.target_tps)
         self._spawn_worker(shard, lease)
+        # df_runner_lease_takeovers_total{reason}: the fencing token is a never-reset
+        # per-shard INCR, so token == 1 is the very first acquire (first start) and a
+        # token > 1 means a prior holder existed — this acquire is a FAILOVER takeover
+        # (the lease key had expired and the claimable scan surfaced it). The metric
+        # backs the RunnerLeaseTakeoverSpike page (rate[10m] > 3). M-3: ``reason`` is
+        # bounded (failover/first_start), never a stream/shard id.
+        reason = "failover" if lease.fencing_token > 1 else "first_start"
+        metrics.runner_lease_takeovers_total.labels(reason=reason).inc()
+        self._publish_lease_gauges()
         logger.info(
             "lease.acquired",
             stream_id=shard.stream_id,
             shard_id=shard.shard_id,
             fencing_token=lease.fencing_token,
         )
+
+    def _publish_lease_gauges(self) -> None:
+        """Refresh ``df_runner_active_leases`` from the live held set.
+
+        The count of shard leases this runner holds — a 4-shard stream contributes 4.
+        Called after every acquire/release/heartbeat-loss so the gauge tracks the held
+        set exactly. (``df_runner_streams_running`` is owned by the shard worker, which
+        inc/decs it per running worker — kept separate to avoid a double-writer race.)
+        """
+        metrics.runner_active_leases.set(len(self._workers))
 
     def _spawn_worker(self, shard: ShardKey, lease: Lease) -> None:
         assert self._redis is not None and self._producer is not None
@@ -262,6 +282,7 @@ class Supervisor:
         finally:
             self._admission.release(shard)
             self._workers.pop(shard, None)
+            self._publish_lease_gauges()
             if self._leases is not None:
                 with contextlib.suppress(Exception):
                     await self._leases.release(shard.stream_id, shard.shard_id)
@@ -343,6 +364,14 @@ class Supervisor:
         await http.setup()
         site = web.TCPSite(http, host="0.0.0.0", port=HEALTH_PORT)
         await site.start()
+        # Expose df_ metrics on DF_METRICS_PORT (observability §4). The sink hosts
+        # (buffer-writer/ws-pusher) run in threads inside this process, so this one
+        # exposer covers the runner + buffer + ws metric families for this group.
+        from django.conf import settings
+
+        from observation.infra import metrics
+
+        metrics.start_metrics_server(settings.DF_METRICS_PORT)
         if self.runs_sinks:
             self._start_sink_hosts()
         logger.info(

@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 from dataforge_engine.envelope import event_id_for
 
 from .generators import GenContext
+from .partitioning import owns_key
 from .pools import PooledEntity
 from .rng import Cursor, UuidBits
 from .transaction import Mutation, PoolTransaction, StreamIdentity
@@ -45,11 +46,22 @@ def seed_pools(
     *,
     emitted_at: datetime,
     overrides: dict[str, int] | None = None,
+    shard_id: int = 0,
+    shard_count: int = 1,
 ) -> list[InternalEnvelope]:
     """Seed all pools and return the head-of-stream ``op:"r"`` snapshot batch.
 
     ``overrides`` may set per-entity catalog sizes (instance-overridable within
     declared min/max, §4.5); absent keys use the manifest default.
+
+    **Sharding (Phase 11).** Every shard registers + seeds the *full* catalog (each
+    shard's pools must be complete for FK/relationship resolution), but a shard emits
+    the head ``op:"r"`` snapshot only for the entity keys it **owns** under
+    ``shard_for_key(entity_key) == shard_id`` — so across the ``shard_count`` shards
+    each seeded entity's snapshot is emitted exactly once (no cross-shard duplication),
+    and each shard's gapless ``sequence_no`` (INV-GEN-7) advances only over its owned
+    snapshots. At ``shard_count == 1`` every key is owned, so the snapshot batch is the
+    legacy single-shard head verbatim (byte-stable, GOLD-A).
     """
     overrides = overrides or {}
     epoch_iso = clock.instant_for(0)
@@ -80,7 +92,8 @@ def seed_pools(
             continue
         snapshots.extend(
             _emit_snapshots(ir, entity_ir, pools, tree, identity, sequence,
-                            occurred_at=epoch_iso, emitted_at=emitted_at)
+                            occurred_at=epoch_iso, emitted_at=emitted_at,
+                            shard_id=shard_id, shard_count=shard_count)
         )
     return snapshots
 
@@ -135,11 +148,22 @@ def _emit_snapshots(
     ir: ManifestIR, entity_ir: EntityIR, pools: EntityPools, tree: SeedTree,
     identity: StreamIdentity, sequence: SequenceCounter,
     *, occurred_at: datetime, emitted_at: datetime,
+    shard_id: int = 0, shard_count: int = 1,
 ) -> list[InternalEnvelope]:
     out: list[InternalEnvelope] = []
     snap_cursor = Cursor(tree.key("values", f"snapshot:{entity_ir.name}"))
     bits = UuidBits(snap_cursor)
     for key in pools.live_keys(entity_ir.name):
+        # Each seeded entity's head snapshot is emitted by exactly one shard — its
+        # owner under the stable hash partition (no cross-shard snapshot duplication).
+        # The shared id-minting cursor (``snap_cursor``) advances exactly one 74-bit
+        # draw per live key REGARDLESS of which shard emits it, so a key's UUIDv7
+        # event_id is identical on every shard (replay-stable, §7.2). A skipped key
+        # therefore still burns its one draw — the per-key id is deterministic and the
+        # owning shard mints the same id it would in the single-shard layout.
+        if not owns_key(key, shard_id=shard_id, shard_count=shard_count):
+            bits.next_random_74()  # keep cursor parity: one draw per live key
+            continue
         record = pools.require(entity_ir.name, key)
         tx = PoolTransaction(ir, identity, occurred_at=occurred_at, emitted_at=emitted_at)
         event_id = event_id_for(occurred_at, bits)

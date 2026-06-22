@@ -113,6 +113,8 @@ class KafkaConsumer(Protocol):
 
     def resume(self, partitions: Sequence[object]) -> None: ...
 
+    def high_watermark(self, topic: str, partition: int) -> int | None: ...
+
     def subscribe(
         self,
         topics: Sequence[str],
@@ -192,6 +194,25 @@ class _ConfluentConsumerAdapter:
 
     def resume(self, partitions: Sequence[object]) -> None:
         self._c.resume(self._to_tps(partitions))  # type: ignore[attr-defined]
+
+    def high_watermark(self, topic: str, partition: int) -> int | None:
+        """The partition's broker log-end offset (for df_kafka_consumer_lag).
+
+        ``get_watermark_offsets`` returns ``(low, high)``; ``high`` is the next
+        offset the broker will assign (the log-end). A short ``cached=True`` read
+        avoids a blocking broker round-trip on the hot commit path — the value is
+        refreshed by the consumer's background fetches. Returns ``None`` if the
+        client cannot answer (treated as "no sample this commit").
+        """
+        from confluent_kafka import TopicPartition
+
+        try:
+            _low, high = self._c.get_watermark_offsets(  # type: ignore[attr-defined]
+                TopicPartition(topic, partition), timeout=1.0, cached=True
+            )
+        except Exception:
+            return None
+        return int(high) if high is not None and high >= 0 else None
 
     def subscribe(
         self,

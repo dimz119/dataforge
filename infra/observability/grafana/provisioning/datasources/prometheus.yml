@@ -1,0 +1,16 @@
+# Grafana datasource provisioning (Phase 11, P11-06).
+# Binds the ${DS_PROMETHEUS} datasource variable in the dashboards to the dev
+# compose Prometheus. uid "dataforge-prometheus" matches what the dashboards
+# resolve their templated datasource to on import.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: dataforge-prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    jsonData:
+      httpMethod: POST
+      timeInterval: 15s

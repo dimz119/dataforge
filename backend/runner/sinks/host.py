@@ -123,6 +123,7 @@ class SinkHost:
         arm_tenant: Callable[[UUID], AbstractContextManager[object]] | None = None,
         linger_ms: int = LINGER_MS,
         max_batch_events: int = MAX_BATCH_EVENTS,
+        group: str = "",
     ) -> None:
         self._consumer = consumer
         self._channel = channel
@@ -131,6 +132,10 @@ class SinkHost:
         self._arm_tenant = arm_tenant
         self._linger_ms = linger_ms
         self._max_batch_events = max_batch_events
+        # The consumer-group id this host runs as — the {group} metric label
+        # (observability §4 kafka family). Empty in unit tests that inject a fake
+        # consumer; the entrypoints pass the platform group id.
+        self._group = group
         self._stopped = False
         self._paused: dict[tuple[str, int], int] = {}  # (topic, partition) -> resume_at_ms
         self._backoff_ms: dict[tuple[str, int], int] = {}
@@ -181,6 +186,13 @@ class SinkHost:
                 count += 1
             if _now_ms() >= deadline:
                 break
+        if count > 0 and self._group:
+            from observation.infra import metrics
+
+            # df_kafka_consumer_fetch_total{group}: one fetch window that yielded
+            # records (observability §4 kafka family). Empty linger windows are not
+            # counted (no records fetched).
+            metrics.kafka_consumer_fetch_total.labels(group=self._group).inc()
         delivered = 0
         for acc in batches.values():
             delivered += self._deliver_and_commit(acc)
@@ -275,12 +287,42 @@ class SinkHost:
             topic=topic, partition=partition, offset=acked_through + 1
         )
         self._consumer.commit(offsets=[offset], asynchronous=False)
+        self._observe_consumer_lag(topic, partition, committed=acked_through + 1)
         logger.debug(
             "sink_host.committed",
             topic=topic,
             partition=partition,
             acked_through=acked_through,
         )
+
+    def _observe_consumer_lag(self, topic: str, partition: int, *, committed: int) -> None:
+        """Emit df_kafka_consumer_lag{group,topic,partition} = watermark minus committed.
+
+        This is the SLO/alert source (``ConsumerLagGrowing`` page; observability §4,
+        §9). The lag is the broker's log-end offset for the partition minus the offset
+        we just committed (the next offset to consume). The narrow KafkaConsumer
+        protocol may not expose watermarks (the unit-test fake does not) — best-effort
+        via ``high_watermark``; absent it, the metric is simply not updated this commit.
+        ``partition`` is bounded (per-shard internal partitions ≤ 64), so it is an
+        admissible label (M-3 bans only workspace/stream/user/event ids).
+        """
+        if not self._group:
+            return
+        probe = getattr(self._consumer, "high_watermark", None)
+        if probe is None:
+            return
+        try:
+            hi = probe(topic, partition)
+        except Exception:
+            return
+        if hi is None:
+            return
+        from observation.infra import metrics
+
+        lag = max(0, int(hi) - committed)
+        metrics.kafka_consumer_lag.labels(
+            group=self._group, topic=topic, partition=str(partition)
+        ).set(lag)
 
     # -- backpressure (SINK-8) ---------------------------------------------------
 

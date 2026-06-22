@@ -22,6 +22,7 @@ export const queryKeys = {
   // --- Tenant subtree root (prefix removal evicts everything for a workspace) ---
   workspace: (wsId: string) => ['w', wsId] as const,
   workspaceDetail: (wsId: string) => ['w', wsId, 'detail'] as const,
+  quotas: (wsId: string) => ['w', wsId, 'quotas'] as const,
   members: (wsId: string) => ['w', wsId, 'members'] as const,
   activity: (wsId: string, filters?: unknown) => ['w', wsId, 'activity', filters ?? null] as const,
   keys: (wsId: string) => ['w', wsId, 'keys'] as const,

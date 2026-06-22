@@ -1,0 +1,422 @@
+# DataForge alert rules (Phase 11, P11-06).
+#
+# All 16 FROZEN alert names from observability.md §9, with the exact conditions
+# from §8 (error-budget burn policy) and §9 (per-alert conditions). The three
+# SLO burn alerts (ApiAvailabilityBurn / DeliveryFreshnessBurn / WsConnectBurn)
+# use the Google-SRE multiwindow / multi-burn-rate pattern (§8):
+#
+#   page   : burn > 14.4x over 1h  AND  burn > 14.4x over 5m   (2% budget/hour)
+#   page   : burn > 6x    over 6h  AND  burn > 6x    over 30m
+#   ticket : burn > 3x    over 24h AND  burn > 3x    over 2h
+#   ticket : burn > 1x    over 3d  AND  burn > 1x    over 6h
+#
+# burn rate = errorRatio / errorBudget, where
+#   errorRatio  = 1 - sli:<slo>:ratio_rate<window>   (recorded in slo-recording-rules.yml)
+#   errorBudget = 1 - target                          (SLO-1 .005, SLO-2 .01, SLO-3 .005)
+#
+# The short-window confirmation legs (5m/30m/2h/6h) suppress flapping per the SRE
+# workbook; each tier carries a distinct severity + alertname suffix but the
+# user-facing/paging alertname is the frozen base name (label `alertname` from
+# the `alert:` key plus a `burn_window` label distinguishing tiers).
+#
+# Validated by yaml.safe_load (artifact-only; not run against a live Prometheus
+# in this phase per the build scope). PromQL references the exact df_ metric
+# names + labels from observation/infra/metrics.py.
+
+groups:
+  # =======================================================================
+  # SLO-1 — ApiAvailabilityBurn (page)  [observability.md §9, §8]
+  # =======================================================================
+  - name: dataforge_alerts_api_availability_burn
+    rules:
+      - alert: ApiAvailabilityBurn
+        expr: |
+          (
+            (1 - sli:slo1_api_availability:ratio_rate1h) > (14.4 * (1 - 0.995))
+            and
+            (1 - sli:slo1_api_availability:ratio_rate5m) > (14.4 * (1 - 0.995))
+          )
+        for: 2m
+        labels:
+          severity: page
+          slo: slo1_api_availability
+          burn_window: 1h_5m
+        annotations:
+          summary: "SLO-1 control-plane availability burning >14.4x (1h and 5m)"
+          description: "Fast burn: >2% of the 30-day error budget per hour on /api/v1/*. Runbook: infra/runbooks/ApiAvailabilityBurn.md"
+          runbook: "infra/runbooks/ApiAvailabilityBurn.md"
+      - alert: ApiAvailabilityBurn
+        expr: |
+          (
+            (1 - sli:slo1_api_availability:ratio_rate6h) > (6 * (1 - 0.995))
+            and
+            (1 - sli:slo1_api_availability:ratio_rate1h) > (6 * (1 - 0.995))
+          )
+        for: 15m
+        labels:
+          severity: page
+          slo: slo1_api_availability
+          burn_window: 6h_1h
+        annotations:
+          summary: "SLO-1 control-plane availability burning >6x (6h and 1h)"
+          description: "Sustained burn of the control-plane error budget. Runbook: infra/runbooks/ApiAvailabilityBurn.md"
+          runbook: "infra/runbooks/ApiAvailabilityBurn.md"
+      - alert: ApiAvailabilityBurn
+        expr: |
+          (
+            (1 - sli:slo1_api_availability:ratio_rate24h) > (3 * (1 - 0.995))
+            and
+            (1 - sli:slo1_api_availability:ratio_rate6h) > (3 * (1 - 0.995))
+          )
+        for: 1h
+        labels:
+          severity: ticket
+          slo: slo1_api_availability
+          burn_window: 24h_6h
+        annotations:
+          summary: "SLO-1 control-plane availability burning >3x (24h and 6h)"
+          description: "Slow burn ticket for the control-plane error budget. Runbook: infra/runbooks/ApiAvailabilityBurn.md"
+          runbook: "infra/runbooks/ApiAvailabilityBurn.md"
+      - alert: ApiAvailabilityBurn
+        expr: |
+          (
+            (1 - sli:slo1_api_availability:ratio_rate3d) > (1 * (1 - 0.995))
+            and
+            (1 - sli:slo1_api_availability:ratio_rate6h) > (1 * (1 - 0.995))
+          )
+        for: 3h
+        labels:
+          severity: ticket
+          slo: slo1_api_availability
+          burn_window: 3d_6h
+        annotations:
+          summary: "SLO-1 control-plane availability burning >1x (3d and 6h)"
+          description: "Long-window budget exhaustion ticket. Runbook: infra/runbooks/ApiAvailabilityBurn.md"
+          runbook: "infra/runbooks/ApiAvailabilityBurn.md"
+
+  # =======================================================================
+  # SLO-2 — DeliveryFreshnessBurn (page)  [observability.md §9, §8]
+  # =======================================================================
+  - name: dataforge_alerts_delivery_freshness_burn
+    rules:
+      - alert: DeliveryFreshnessBurn
+        expr: |
+          (
+            (1 - sli:slo2_delivery_success:ratio_rate1h) > (14.4 * (1 - 0.99))
+            and
+            (1 - sli:slo2_delivery_success:ratio_rate5m) > (14.4 * (1 - 0.99))
+          )
+        for: 2m
+        labels:
+          severity: page
+          slo: slo2_delivery_success
+          burn_window: 1h_5m
+        annotations:
+          summary: "SLO-2 delivery freshness burning >14.4x (1h and 5m)"
+          description: "Fast burn: events not visible to the REST cursor within 30s. Runbook: infra/runbooks/DeliveryFreshnessBurn.md"
+          runbook: "infra/runbooks/DeliveryFreshnessBurn.md"
+      - alert: DeliveryFreshnessBurn
+        expr: |
+          (
+            (1 - sli:slo2_delivery_success:ratio_rate6h) > (6 * (1 - 0.99))
+            and
+            (1 - sli:slo2_delivery_success:ratio_rate1h) > (6 * (1 - 0.99))
+          )
+        for: 15m
+        labels:
+          severity: page
+          slo: slo2_delivery_success
+          burn_window: 6h_1h
+        annotations:
+          summary: "SLO-2 delivery freshness burning >6x (6h and 1h)"
+          description: "Sustained delivery-lag burn. Runbook: infra/runbooks/DeliveryFreshnessBurn.md"
+          runbook: "infra/runbooks/DeliveryFreshnessBurn.md"
+      - alert: DeliveryFreshnessBurn
+        expr: |
+          (
+            (1 - sli:slo2_delivery_success:ratio_rate24h) > (3 * (1 - 0.99))
+            and
+            (1 - sli:slo2_delivery_success:ratio_rate6h) > (3 * (1 - 0.99))
+          )
+        for: 1h
+        labels:
+          severity: ticket
+          slo: slo2_delivery_success
+          burn_window: 24h_6h
+        annotations:
+          summary: "SLO-2 delivery freshness burning >3x (24h and 6h)"
+          description: "Slow delivery-lag burn ticket. Runbook: infra/runbooks/DeliveryFreshnessBurn.md"
+          runbook: "infra/runbooks/DeliveryFreshnessBurn.md"
+      - alert: DeliveryFreshnessBurn
+        expr: |
+          (
+            (1 - sli:slo2_delivery_success:ratio_rate3d) > (1 * (1 - 0.99))
+            and
+            (1 - sli:slo2_delivery_success:ratio_rate6h) > (1 * (1 - 0.99))
+          )
+        for: 3h
+        labels:
+          severity: ticket
+          slo: slo2_delivery_success
+          burn_window: 3d_6h
+        annotations:
+          summary: "SLO-2 delivery freshness burning >1x (3d and 6h)"
+          description: "Long-window delivery budget exhaustion ticket. Runbook: infra/runbooks/DeliveryFreshnessBurn.md"
+          runbook: "infra/runbooks/DeliveryFreshnessBurn.md"
+
+  # =======================================================================
+  # SLO-3 — WsConnectBurn (page)  [observability.md §9, §8]
+  # =======================================================================
+  - name: dataforge_alerts_ws_connect_burn
+    rules:
+      - alert: WsConnectBurn
+        expr: |
+          (
+            (1 - sli:slo3_ws_connect:ratio_rate1h) > (14.4 * (1 - 0.995))
+            and
+            (1 - sli:slo3_ws_connect:ratio_rate5m) > (14.4 * (1 - 0.995))
+          )
+        for: 2m
+        labels:
+          severity: page
+          slo: slo3_ws_connect
+          burn_window: 1h_5m
+        annotations:
+          summary: "SLO-3 WS connect success burning >14.4x (1h and 5m)"
+          description: "Fast burn: valid WS handshakes failing to reach subscribed in 3s. Runbook: infra/runbooks/WsConnectBurn.md"
+          runbook: "infra/runbooks/WsConnectBurn.md"
+      - alert: WsConnectBurn
+        expr: |
+          (
+            (1 - sli:slo3_ws_connect:ratio_rate6h) > (6 * (1 - 0.995))
+            and
+            (1 - sli:slo3_ws_connect:ratio_rate1h) > (6 * (1 - 0.995))
+          )
+        for: 15m
+        labels:
+          severity: page
+          slo: slo3_ws_connect
+          burn_window: 6h_1h
+        annotations:
+          summary: "SLO-3 WS connect success burning >6x (6h and 1h)"
+          description: "Sustained WS connect burn. Runbook: infra/runbooks/WsConnectBurn.md"
+          runbook: "infra/runbooks/WsConnectBurn.md"
+      - alert: WsConnectBurn
+        expr: |
+          (
+            (1 - sli:slo3_ws_connect:ratio_rate24h) > (3 * (1 - 0.995))
+            and
+            (1 - sli:slo3_ws_connect:ratio_rate6h) > (3 * (1 - 0.995))
+          )
+        for: 1h
+        labels:
+          severity: ticket
+          slo: slo3_ws_connect
+          burn_window: 24h_6h
+        annotations:
+          summary: "SLO-3 WS connect success burning >3x (24h and 6h)"
+          description: "Slow WS connect burn ticket. Runbook: infra/runbooks/WsConnectBurn.md"
+          runbook: "infra/runbooks/WsConnectBurn.md"
+      - alert: WsConnectBurn
+        expr: |
+          (
+            (1 - sli:slo3_ws_connect:ratio_rate3d) > (1 * (1 - 0.995))
+            and
+            (1 - sli:slo3_ws_connect:ratio_rate6h) > (1 * (1 - 0.995))
+          )
+        for: 3h
+        labels:
+          severity: ticket
+          slo: slo3_ws_connect
+          burn_window: 3d_6h
+        annotations:
+          summary: "SLO-3 WS connect success burning >1x (3d and 6h)"
+          description: "Long-window WS budget exhaustion ticket. Runbook: infra/runbooks/WsConnectBurn.md"
+          runbook: "infra/runbooks/WsConnectBurn.md"
+
+  # =======================================================================
+  # Companion latency + the non-burn operational alerts (observability.md §9)
+  # =======================================================================
+  - name: dataforge_alerts_operational
+    rules:
+      # ApiLatencyP99 (ticket): route p99 > 2x its SLO bound, 15 min.
+      # SLO bounds: reads (GET) 500ms -> page above 1s; writes 1s -> page above 2s.
+      # Computed from the duration histogram per route via histogram_quantile.
+      - alert: ApiLatencyP99
+        expr: |
+          (
+            histogram_quantile(
+              0.99,
+              sum by (route, le) (
+                rate(df_http_request_duration_seconds_bucket{method="GET", route=~"/api/v1.*"}[15m])
+              )
+            ) > 1
+          )
+          or
+          (
+            histogram_quantile(
+              0.99,
+              sum by (route, le) (
+                rate(df_http_request_duration_seconds_bucket{method=~"POST|PUT|PATCH|DELETE", route=~"/api/v1.*"}[15m])
+              )
+            ) > 2
+          )
+        for: 15m
+        labels:
+          severity: ticket
+          plane: control
+        annotations:
+          summary: "Route p99 latency > 2x its SLO bound for 15m"
+          description: "A /api/v1 route p99 exceeds 2x its latency SLO (reads 500ms, writes 1s). Source df_http_request_duration_seconds."
+
+      # KafkaBrokerDown (page): df_kafka_broker_up == 0 from >= 2 processes, 1 min.
+      # Each process reports its own broker reachability gauge; count the zeros.
+      - alert: KafkaBrokerDown
+        expr: count(df_kafka_broker_up == 0) >= 2
+        for: 1m
+        labels:
+          severity: page
+          failure_domain: kafka
+        annotations:
+          summary: "Kafka broker unreachable from >= 2 processes for 1m"
+          description: "df_kafka_broker_up == 0 from at least two process groups; the single broker is platform-wide. Runbook: infra/runbooks/KafkaBrokerDown.md"
+          runbook: "infra/runbooks/KafkaBrokerDown.md"
+
+      # ConsumerLagGrowing (page): df_kafka_consumer_lag monotone increase 10 min per group.
+      # Approximated robustly as a sustained positive slope of the lag over 10m,
+      # evaluated per (group,topic,partition) then required true per group.
+      - alert: ConsumerLagGrowing
+        expr: |
+          min by (group) (
+            deriv(df_kafka_consumer_lag[10m])
+          ) > 0
+        for: 10m
+        labels:
+          severity: page
+          failure_domain: sinks
+        annotations:
+          summary: "Kafka consumer lag growing monotonically for 10m"
+          description: "df_kafka_consumer_lag has a positive slope across all partitions of a group for 10m (consumer falling behind). Runbook: infra/runbooks/ConsumerLagGrowing.md"
+          runbook: "infra/runbooks/ConsumerLagGrowing.md"
+
+      # RunnerLeaseTakeoverSpike (page): rate(df_runner_lease_takeovers_total[10m]) > 3.
+      - alert: RunnerLeaseTakeoverSpike
+        expr: sum(rate(df_runner_lease_takeovers_total[10m])) > 3
+        for: 1m
+        labels:
+          severity: page
+          failure_domain: runner
+        annotations:
+          summary: "Runner shard lease takeovers spiking (> 3 / 10m)"
+          description: "rate(df_runner_lease_takeovers_total[10m]) > 3 — runner fleet churning leases. Runbook: infra/runbooks/RunnerLeaseTakeoverSpike.md"
+          runbook: "infra/runbooks/RunnerLeaseTakeoverSpike.md"
+
+      # StreamFailoverExhausted (page): log-derived (any stream enters `failed`
+      # with failover_exhausted). Logs are shipped to a log-metric exporter that
+      # exposes df_stream_failover_exhausted_total; alert on any increase.
+      # (The metric is log-derived per §9, not in the §4 df_ catalog; the
+      # condition is documented here so the page has a rule + runbook.)
+      - alert: StreamFailoverExhausted
+        expr: increase(df_stream_failover_exhausted_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: page
+          failure_domain: runner
+        annotations:
+          summary: "A stream entered failed with failover_exhausted"
+          description: "Log-derived: a stream exhausted shard failover and entered failed. Runbook: infra/runbooks/StreamFailoverExhausted.md"
+          runbook: "infra/runbooks/StreamFailoverExhausted.md"
+
+      # LateBufferOverdue (page): df_chaos_late_buffer_overdue > 100 for 5 min.
+      - alert: LateBufferOverdue
+        expr: df_chaos_late_buffer_overdue > 100
+        for: 5m
+        labels:
+          severity: page
+          failure_domain: chaos
+        annotations:
+          summary: "Chaos late-arrival buffer overdue entries > 100 for 5m"
+          description: "df_chaos_late_buffer_overdue > 100 — INV-CHA-5 scheduler not draining due re-emissions. Runbook: infra/runbooks/LateBufferOverdue.md"
+          runbook: "infra/runbooks/LateBufferOverdue.md"
+
+      # CheckpointStale (ticket): df_checkpoint_age_seconds > 300.
+      - alert: CheckpointStale
+        expr: df_checkpoint_age_seconds > 300
+        for: 5m
+        labels:
+          severity: ticket
+          failure_domain: runner
+        annotations:
+          summary: "Checkpoint age > 300s"
+          description: "df_checkpoint_age_seconds > 300 — runner not committing checkpoints; restart-continuation window widening."
+
+      # BufferRetentionStalled (ticket): oldest partition age > retention + 6h.
+      # Retention is plan-dependent (24/48h); the conservative platform bound is
+      # 48h + 6h = 54h = 194400s on the oldest partition across the buffer.
+      - alert: BufferRetentionStalled
+        expr: df_buffer_oldest_partition_age_seconds > 194400
+        for: 30m
+        labels:
+          severity: ticket
+          failure_domain: worker
+        annotations:
+          summary: "Buffer oldest-partition age beyond retention + 6h"
+          description: "df_buffer_oldest_partition_age_seconds > 54h — the partition-drop maintenance job is not advancing."
+
+      # BeatDead (page): df_beat_last_run_timestamp_seconds stale > 2x schedule.
+      # The shortest beat schedule is 60s; 2x => alert when the most-recent fire
+      # across all schedules is older than 120s.
+      - alert: BeatDead
+        expr: (time() - max(df_beat_last_run_timestamp_seconds)) > 120
+        for: 1m
+        labels:
+          severity: page
+          failure_domain: beat
+        annotations:
+          summary: "Celery beat singleton has not fired in > 2x its schedule"
+          description: "time() - max(df_beat_last_run_timestamp_seconds) > 120s — beat is dead; no scheduled maintenance/quota/idle jobs run. Runbook: infra/runbooks/BeatDead.md"
+          runbook: "infra/runbooks/BeatDead.md"
+
+      # CeleryQueueBacklog (ticket): df_celery_queue_depth > 1000 for 15 min.
+      - alert: CeleryQueueBacklog
+        expr: max(df_celery_queue_depth) > 1000
+        for: 15m
+        labels:
+          severity: ticket
+          failure_domain: worker
+        annotations:
+          summary: "Celery queue depth > 1000 for 15m"
+          description: "max(df_celery_queue_depth) > 1000 — worker pool not keeping up; scale workers or investigate stuck tasks."
+
+      # AuthFailureSpike (ticket): rate(df_auth_failures_total[5m]) > 50.
+      - alert: AuthFailureSpike
+        expr: sum(rate(df_auth_failures_total[5m])) > 50
+        for: 5m
+        labels:
+          severity: ticket
+          signal: abuse
+        annotations:
+          summary: "Authentication failure rate > 50/5m"
+          description: "rate(df_auth_failures_total[5m]) > 50 — possible credential-stuffing / abuse signal (security-architecture.md)."
+
+      # QuotaPauseSpike (ticket): rate(df_quota_pauses_total[1h]) > 20.
+      - alert: QuotaPauseSpike
+        expr: sum(rate(df_quota_pauses_total[1h])) * 3600 > 20
+        for: 5m
+        labels:
+          severity: ticket
+          signal: product
+        annotations:
+          summary: "Quota/idle system-pause rate > 20/hour"
+          description: "Many streams system-paused (quota|idle) in the last hour — product signal, not infra. Source df_quota_pauses_total."
+
+      # CursorExpiredSpike (ticket): rate(df_cursor_expired_total[1h]) > 50.
+      - alert: CursorExpiredSpike
+        expr: sum(rate(df_cursor_expired_total[1h])) * 3600 > 50
+        for: 5m
+        labels:
+          severity: ticket
+          signal: docs
+        annotations:
+          summary: "REST cursor-expiry rate > 50/hour"
+          description: "rate(df_cursor_expired_total[1h]) > 50 — consumers slower than buffer retention; teaching/docs signal."

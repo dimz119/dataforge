@@ -39,7 +39,7 @@ function stream(status: string): StreamResponse {
 }
 
 describe('WorkspaceSummaryCard', () => {
-  it('shows usage numbers without limit bars (Phase 11 deferred)', () => {
+  it('shows usage numbers; no limit bars when quota usage is absent', () => {
     render(
       <WorkspaceSummaryCard
         workspace={workspace}
@@ -51,7 +51,29 @@ describe('WorkspaceSummaryCard', () => {
     expect(screen.getByText('3')).toBeInTheDocument(); // member count
     expect(screen.getByText('1,234')).toBeInTheDocument(); // events today
     expect(screen.getByText('1')).toBeInTheDocument(); // active streams (only running)
-    expect(screen.queryByRole('progressbar')).toBeNull(); // no limit bars
+    expect(screen.queryByRole('progressbar')).toBeNull(); // no bars until quotas load
+  });
+
+  it('renders the three QuotaMeter bars when quota usage is present (P11)', () => {
+    render(
+      <WorkspaceSummaryCard
+        workspace={workspace}
+        streams={[stream('running')]}
+        eventsToday={500_000}
+        quotas={{
+          events_per_day: { limit: 1_000_000, used: 500_000 },
+          aggregate_tps_cap: { limit: 1000, used: 250 },
+          concurrent_streams: { limit: 5, used: 1 },
+        }}
+      />,
+    );
+    const bars = screen.getAllByRole('progressbar');
+    expect(bars).toHaveLength(3);
+    expect(screen.getByRole('progressbar', { name: 'Events / day' })).toHaveAttribute(
+      'aria-valuenow',
+      '50',
+    );
+    expect(screen.getByText('500,000 / 1,000,000')).toBeInTheDocument();
   });
 });
 

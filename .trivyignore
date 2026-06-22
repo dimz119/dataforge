@@ -1,0 +1,30 @@
+# .trivyignore — DataForge dependency-vulnerability scan exception file
+# (GA-SECURITY-CHECKLIST item 13; security-architecture.md §13.1, SEC-DEP-4, TM-7).
+#
+# This file is consumed by the `dependency-scan` CI job (.github/workflows/ci.yaml),
+# which runs `trivy fs` over the repo and FAILS the build on any HIGH/CRITICAL
+# advisory in a backend (uv.lock / pyproject.toml) or frontend (package-lock.json)
+# dependency. It is the single, version-controlled, tunable waiver list — the gate
+# stays strict by default and exceptions are explicit, reviewable, and time-boxed.
+#
+# POLICY (item 13: "dependency-exception file contains no expired entries"):
+#   * One CVE id per line (e.g. CVE-2024-12345). Blank lines and `#` comments allowed.
+#   * EVERY entry MUST carry, in a preceding comment block:
+#       - the package + why the advisory does not apply / is accepted,
+#       - a tracking link (issue/PR),
+#       - an EXPIRES: YYYY-MM-DD date (the time-box).
+#   * An entry past its EXPIRES date is an "expired entry" and is a GA blocker per
+#     the checklist — remove it (and fix the dep) or consciously re-justify + extend.
+#   * Advisories with NO upstream fix are NOT listed here: the job already runs with
+#     `ignore-unfixed: true`, so unpatchable upstream CVEs do not gate and need no
+#     waiver. This file is only for *fixable* HIGH/CRITICAL findings we are
+#     deliberately deferring for a bounded window.
+#
+# Format example (keep commented until a real waiver is needed):
+#   # CVE-2025-00000 — <package>@<version>: <one-line justification>.
+#   #   Tracking: <issue/PR url>
+#   #   EXPIRES: 2026-09-01
+#   CVE-2025-00000
+#
+# --- Active waivers ---
+# (none — the gate is fully strict; add justified, time-boxed entries above as needed.)

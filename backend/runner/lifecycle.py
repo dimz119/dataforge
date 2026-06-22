@@ -21,6 +21,7 @@ never blocks. This module is a Django host seam (the engine owns no ORM).
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import structlog
@@ -36,15 +37,26 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger("dataforge.runner.lifecycle")
 
-__all__ = ["incr_emitted", "report_lifecycle", "stats_key"]
+__all__ = ["incr_emitted", "incr_workspace_events_today", "report_lifecycle", "stats_key"]
 
 # Redis per-stream emitted-events counter key (INV-OBS-2). Read by Observation.
 _STATS_KEY = "df:stats:emitted:{stream_id}"
+# Per-workspace UTC-day events meter key (P11-07). MUST match the format
+# streams.application.metering.day_bucket_key produces so the command-time quota
+# read and this data-plane write address the same counter (INV-OBS-3: per-workspace).
+_EVENTS_DAY_KEY = "df:quota:events:{workspace_id}:{day}"
+# A day bucket lives 2 days so a near-midnight read still sees it; self-prunes.
+_EVENTS_DAY_TTL_SECONDS = 2 * 86_400
 
 
 def stats_key(stream_id: str) -> str:
     """The Redis emitted-events counter key for a stream (§8.3 step 9)."""
     return _STATS_KEY.format(stream_id=stream_id)
+
+
+def _events_day_key(workspace_id: str, day: str) -> str:
+    """The per-workspace UTC-day events-meter key (twin of metering.day_bucket_key)."""
+    return _EVENTS_DAY_KEY.format(workspace_id=workspace_id, day=day)
 
 
 async def report_lifecycle(
@@ -115,6 +127,34 @@ async def incr_emitted(redis: Redis, stream_id: str, count: int) -> None:
         await redis.incrby(stats_key(stream_id), count)
     except Exception as exc:
         logger.warning("stats.incr_degraded", stream_id=stream_id, error=str(exc))
+
+
+async def incr_workspace_events_today(
+    redis: Redis, workspace_id: str, count: int
+) -> int:
+    """Bump ``workspace_id``'s UTC-day events meter by ``count`` (P11-07; best-effort).
+
+    The data-plane half of events/day metering: the runner increments the same
+    per-workspace day bucket the command-time quota check reads
+    (:func:`streams.application.metering.events_consumed_today`). Returns the
+    post-increment day total so the caller can check exhaustion in-tick (``0`` on a
+    degraded cache — fail-open: a Redis outage must never pause a tenant). The key is
+    (re)stamped with a 2-day TTL so buckets self-prune. INV-OBS-3: the key is keyed
+    by ``workspace_id`` alone, so one workspace's count never touches another's.
+    """
+    if count <= 0:
+        return 0
+    day = datetime.now(UTC).date().isoformat()
+    key = _events_day_key(workspace_id, day)
+    try:
+        pipe = redis.pipeline()
+        pipe.incrby(key, count)
+        pipe.expire(key, _EVENTS_DAY_TTL_SECONDS)
+        result = await pipe.execute()
+        return int(result[0])
+    except Exception as exc:
+        logger.warning("metering.incr_degraded", workspace_id=workspace_id, error=str(exc))
+        return 0
 
 
 # Re-export the running/stopped target states the worker reports, so callers import

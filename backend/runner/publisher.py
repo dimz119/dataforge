@@ -125,6 +125,15 @@ class EventPublisher:
         """
         if not envelopes:
             return 0
+        import time
+
+        from observation.infra import metrics
+
+        # df_kafka_publish_duration_seconds (M-5 inner-loop): produce+flush wall time
+        # for the tick batch; df_kafka_publish_total{result} counts per-envelope
+        # produce outcomes (§4 kafka family). A flush failure is the producer's only
+        # observable error here (produce is async-buffered).
+        started = time.monotonic()
         for env in envelopes:
             key = str(env["partition_key"]).encode("utf-8")
             value = canonical_serialize(env)  # S-2 canonical bytes (internal shape)
@@ -132,11 +141,21 @@ class EventPublisher:
         # Bounded in-flight: drain this batch before the tick returns so a
         # subsequently-cancelled worker cannot leave a second batch outstanding.
         unflushed = self._producer.flush(self._flush_timeout_s)
+        metrics.kafka_publish_duration_seconds.observe(time.monotonic() - started)
+        produced = len(envelopes)
         if unflushed:
+            # Some records did not drain within the flush budget — at-least-once
+            # licenses the redelivery (§8.2); count the residual as failed/retried.
+            failed = min(unflushed, produced)
+            metrics.kafka_publish_total.labels(result="ok").inc(produced - failed)
+            metrics.kafka_publish_total.labels(result="error").inc(failed)
+            metrics.kafka_publish_retries_total.inc(failed)
             logger.warning(
                 "publisher.flush_incomplete",
                 topic=self._topic,
                 unflushed=unflushed,
             )
-        self.published_total += len(envelopes)
-        return len(envelopes)
+        else:
+            metrics.kafka_publish_total.labels(result="ok").inc(produced)
+        self.published_total += produced
+        return produced

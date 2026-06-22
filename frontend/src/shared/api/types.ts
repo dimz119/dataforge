@@ -31,6 +31,28 @@ export type Membership = Schemas['Membership'];
 export type RoleEnum = Schemas['RoleEnum'];
 export type AuditEntry = Schemas['AuditEntry'];
 
+/**
+ * The `GET /workspaces/{id}/quotas` response. The generated `Quota.quotas` is an
+ * opaque `DictField` (`{[key: string]: unknown}` in OpenAPI), so the per-quota shape
+ * is hand-curated here from the backend `QuotaView` body (tenancy/api/viewsets.py
+ * `_live_quota_usage` + `QuotaView.get`). Each entry carries `limit`; the three
+ * metered quotas (events/day, aggregate TPS, concurrent streams) also carry `used`.
+ */
+export type Quota = Schemas['Quota'];
+
+/** A single quota line: a hard `limit`, and (for metered quotas) the live `used`. */
+export interface QuotaLimit {
+  limit: number;
+  used?: number;
+}
+
+/** The typed view of `Quota.quotas` — only the meter-relevant keys are surfaced. */
+export interface WorkspaceQuotaUsage {
+  events_per_day: QuotaLimit;
+  aggregate_tps_cap: QuotaLimit;
+  concurrent_streams: QuotaLimit;
+}
+
 // --- API keys ---
 export type ApiKeyListItem = Schemas['ApiKeyListItem'];
 export type ApiKeyCreate = Schemas['ApiKeyCreate'];

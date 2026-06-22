@@ -29,6 +29,21 @@ from config.problems import AmbiguousCredentials
 API_KEY_HEADER = "X-API-Key"
 
 
+def _record_auth_failure(mechanism: str, reason: str) -> None:
+    """df_auth_failures_total{mechanism,reason} (observability §4; AuthFailureSpike).
+
+    ``mechanism`` ∈ {api_key, jwt}; ``reason`` is a closed, bounded slug (never the
+    presented credential, M-3 / redaction). Best-effort — a metrics failure must
+    never turn an auth rejection into a 500.
+    """
+    try:
+        from observation.infra import metrics
+
+        metrics.auth_failures_total.labels(mechanism=mechanism, reason=reason).inc()
+    except Exception:  # pragma: no cover - metrics must never break auth
+        pass
+
+
 class ApiKeyPrincipal:
     """The request principal for an API-key-authenticated request.
 
@@ -59,13 +74,22 @@ class ApiKeyAuthentication(BaseAuthentication):
             return None  # no key on this surface → defer to other auth classes
         if has_authorization:
             # Both credential types present → exactly-one-principal rule (A-2).
+            _record_auth_failure("api_key", "ambiguous_credentials")
             raise AmbiguousCredentials()
 
         # Lazy import: keep the application layer out of DRF's settings-time
         # resolution of DEFAULT_AUTHENTICATION_CLASSES (avoids a circular import).
         from tenancy.application import keys as key_service
 
-        verified = key_service.verify_key(presented)  # raises 401 invalid-api-key
+        try:
+            verified = key_service.verify_key(presented)  # raises 401 invalid-api-key
+        except Exception:
+            # Every key-verification failure is the single 401 invalid-api-key (A-3,
+            # no state oracle). The metric reason is the closed slug, never the
+            # specific cause (which would itself be a state oracle); the key value is
+            # never logged or labelled (M-3 / redaction).
+            _record_auth_failure("api_key", "invalid_api_key")
+            raise
         principal = ApiKeyPrincipal(
             api_key_id=verified.api_key_id,
             workspace_id=verified.workspace_id,

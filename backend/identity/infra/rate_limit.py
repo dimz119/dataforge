@@ -13,6 +13,7 @@ client-controlled `X-Forwarded-For` is never trusted for keying.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import cast
 
@@ -92,3 +93,89 @@ def signup_windows() -> tuple[Window, ...]:
         Window(limit=settings.SIGNUP_RATE_LIMIT_PER_HOUR, seconds=3600),
         Window(limit=settings.SIGNUP_RATE_LIMIT_PER_DAY, seconds=86400),
     )
+
+
+# --- Per-key token bucket (P11-08; api-spec §2.8) ----------------------------
+# A Redis token bucket: tokens refill at ``rate_per_sec`` up to ``capacity``; each
+# admitted request consumes one. Smoother than fixed windows (no edge-of-window
+# burst doubling) — the api-spec §2.8 per-key data-plane limiter. Evaluated
+# atomically in a single Lua script so concurrent requests on one key never
+# over-admit (the read-modify-write is server-side).
+@dataclass(frozen=True)
+class TokenBucket:
+    """A token bucket: ``capacity`` tokens, refilling at ``rate_per_sec`` tokens/s."""
+
+    capacity: int
+    rate_per_sec: float
+
+
+# KEYS[1] = bucket key. ARGV: capacity, rate_per_sec, now_ms, ttl_seconds.
+# Returns {allowed (1/0), retry_after_ms}. Stores tokens + last-refill ms in a hash.
+_TOKEN_BUCKET_LUA = """
+local key = KEYS[1]
+local capacity = tonumber(ARGV[1])
+local rate = tonumber(ARGV[2])
+local now_ms = tonumber(ARGV[3])
+local ttl = tonumber(ARGV[4])
+local state = redis.call('HMGET', key, 'tokens', 'ts')
+local tokens = tonumber(state[1])
+local ts = tonumber(state[2])
+if tokens == nil then
+  tokens = capacity
+  ts = now_ms
+end
+local elapsed = math.max(0, now_ms - ts) / 1000.0
+tokens = math.min(capacity, tokens + elapsed * rate)
+local allowed = 0
+local retry_after_ms = 0
+if tokens >= 1.0 then
+  tokens = tokens - 1.0
+  allowed = 1
+else
+  retry_after_ms = math.ceil((1.0 - tokens) / rate * 1000.0)
+end
+redis.call('HSET', key, 'tokens', tokens, 'ts', now_ms)
+redis.call('PEXPIRE', key, ttl)
+return {allowed, retry_after_ms}
+"""
+
+
+def check_token_bucket(scope: str, identifier: str, bucket: TokenBucket) -> RateLimitResult:
+    """Consume one token from ``scope``:``identifier``'s bucket (P11-08).
+
+    Atomic (one Lua eval) so concurrent requests on one key never over-admit.
+    ``retry_after`` is whole seconds until one token refills (≥ 1 when denied).
+    Fails **open** on a degraded cache (logs + allows) — a Redis outage must not
+    deny legitimate traffic, the same stance as the fixed-window limiter above.
+    """
+    if bucket.capacity <= 0 or bucket.rate_per_sec <= 0:
+        return RateLimitResult(allowed=True)
+    key = f"tb:{scope}:{identifier}"
+    # The bucket key lives long enough to refill from empty to full, plus a margin,
+    # so an idle key self-prunes without losing in-flight refill state.
+    ttl_ms = int((bucket.capacity / bucket.rate_per_sec + 60) * 1000)
+    now_ms = int(time.time() * 1000)
+    try:
+        client = _redis()
+        # ARGV are passed as strings (the Lua ``tonumber`` parses them); redis-py's
+        # stubs type eval's argv as str even though it accepts numbers at runtime.
+        result = cast(
+            "list[int]",
+            client.eval(
+                _TOKEN_BUCKET_LUA,
+                1,
+                key,
+                str(bucket.capacity),
+                str(bucket.rate_per_sec),
+                str(now_ms),
+                str(ttl_ms),
+            ),
+        )
+        allowed = bool(result[0])
+        if allowed:
+            return RateLimitResult(allowed=True)
+        retry_after = max(1, (int(result[1]) + 999) // 1000)
+        return RateLimitResult(allowed=False, retry_after=retry_after)
+    except redis.RedisError as exc:
+        logger.warning("rate_limit_degraded", scope=scope, error=str(exc))
+        return RateLimitResult(allowed=True)

@@ -36,6 +36,7 @@ import structlog
 from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
 
+from config.logging import bind_log_context, unbind_log_context
 from delivery.application.ws_auth import resolve_ws_auth
 from delivery.application.ws_send_queue import DropOldestSendQueue, QueuedFrame
 from delivery.domain.ws_cursor import cursor_after_event, fingerprint_for
@@ -62,6 +63,22 @@ __all__ = ["StreamEventsConsumer"]
 
 # How often the revoked-key watch polls the revocation cache (< 1 s disconnect, WS-3).
 _REVOCATION_POLL_S = 0.5
+
+# WS close-code → df_ws_connect_total{result} (observability §4; SLO-3 source). The
+# label set is frozen (accepted/auth_failed/quota_rejected/error/timeout): SLO-3
+# counts accepted/(accepted+error+timeout) and EXCLUDES auth_failed+quota_rejected.
+_CLOSE_RESULT: dict[int, str] = {
+    4401: "auth_failed",  # invalid/revoked key, bad/expired JWT (WS-3)
+    4403: "auth_failed",  # authenticated but missing events:read scope (WS-3)
+    4404: "auth_failed",  # foreign/unknown stream (WS-3, masked)
+    4429: "quota_rejected",  # connection quota exceeded (WS-4)
+    4408: "timeout",  # auth deadline (10 s) expired (WS-2)
+}
+
+
+def _connect_result_for_close(code: int) -> str:
+    """Map a pre-``accepted`` close code to a df_ws_connect_total{result} label."""
+    return _CLOSE_RESULT.get(code, "error")
 
 
 def _json_default(value: Any) -> str:
@@ -138,6 +155,14 @@ class StreamEventsConsumer(AsyncJsonWebsocketConsumer):  # type: ignore[misc]
         self._tasks: list[asyncio.Task[Any]] = []
         self._last_client_activity = time.monotonic()
         self._closing = False
+        # Observability (§4 ws family). ``_connected_at`` times the connection for
+        # df_ws_connection_duration_seconds; ``_active_counted`` guards the
+        # df_ws_connections_active gauge so a teardown only decrements a slot it
+        # incremented; ``_connect_recorded`` guards the single df_ws_connect_total
+        # outcome (one outcome per attempt, accepted-or-rejected).
+        self._connected_at = time.monotonic()
+        self._active_counted = False
+        self._connect_recorded = False
 
         offered = self.scope.get("subprotocols") or []
         if SUBPROTOCOL_V1 not in offered:
@@ -218,6 +243,16 @@ class StreamEventsConsumer(AsyncJsonWebsocketConsumer):  # type: ignore[misc]
         self._authed = True
         self._auth_deadline_task.cancel()
 
+        # WS connect rate limit (P11-08; 10 connects/min/key, api-spec §2.8). Distinct
+        # from the WS-4 concurrent-connection cap below: this bounds the connect RATE.
+        # Keyed by the credential prefix (the per-key set; JWT/anon sockets by IP).
+        # Over the bucket → close 4429 (quota_rejected), the same code/label WS-4 uses.
+        if not await database_sync_to_async(self._connect_rate_allowed)():
+            from delivery.domain.ws_protocol import CLOSE_QUOTA_EXCEEDED
+
+            await self._shutdown(CLOSE_QUOTA_EXCEEDED)
+            return
+
         self._parse_filters(frame)
         # The connection's filter-bound fingerprint (WS-5: filters fixed for the
         # socket's life) — every minted cursor binds to (stream, filter set, entity)
@@ -238,6 +273,23 @@ class StreamEventsConsumer(AsyncJsonWebsocketConsumer):  # type: ignore[misc]
             return
 
         await self.channel_layer.group_add(ws_group_name(self._stream_id), self.channel_name)
+
+        # Bind tenant correlation for every downstream log line on this socket
+        # (observability §3.1; api_key_id carries the prefix only, never a secret).
+        bind_log_context(
+            workspace_id=self._workspace_id,
+            stream_id=self._stream_id,
+            api_key_id=self._key_prefix,
+        )
+        # SLO-3 source: a fully-authed, group-joined socket is an accepted connect
+        # (observability §4). Recorded once; the active gauge follows the slot.
+        from observation.infra import metrics
+
+        if not self._connect_recorded:
+            metrics.ws_connect_total.labels(result="accepted").inc()
+            self._connect_recorded = True
+        metrics.ws_connections_active.inc()
+        self._active_counted = True
 
         position_cursor = self._tail_cursor()
         await self.send_json(
@@ -284,6 +336,23 @@ class StreamEventsConsumer(AsyncJsonWebsocketConsumer):  # type: ignore[misc]
         if isinstance(ent_type, str) and ent_type and isinstance(ent_key, str) and ent_key:
             self._entity_type = ent_type
             self._entity_key = ent_key
+
+    def _connect_rate_allowed(self) -> bool:
+        """Per-key WS connect rate limit (P11-08; 10/min/key). Fails open on a degraded cache.
+
+        Keyed by the credential prefix (``key:df_…``) so it matches the REST
+        per-key set; the connection-rate bucket is shared across all sockets a key
+        opens. Falls back to the channel-scope client address when no key prefix is
+        present (a JWT/console socket), mirroring the REST middleware's IP fallback.
+        """
+        from config.rate_limit_middleware import ws_connect_allowed
+
+        if self._key_prefix:
+            identifier = f"key:{self._key_prefix}"
+        else:
+            client = self.scope.get("client") or ("0.0.0.0", 0)
+            identifier = f"ip:{client[0]}"
+        return ws_connect_allowed(identifier).allowed
 
     def _admit(self) -> bool:
         from delivery.infra.ws_connections import ConnectionSlot, admit_connection
@@ -472,8 +541,14 @@ class StreamEventsConsumer(AsyncJsonWebsocketConsumer):  # type: ignore[misc]
         if prev is not None and frame_seq > prev + 1:
             # A skipped frame_seq is a channel-layer capacity drop: surface it as a
             # drop_notice (INV-DEL-5). The gap size is frame_seq - prev - 1.
-            self._dropped += frame_seq - prev - 1
-            self._queue_drop_notice(frame_seq - prev - 1, self._last_cursor)
+            gap = frame_seq - prev - 1
+            self._dropped += gap
+            # df_ws_frames_dropped_total{reason=backpressure}: channel-layer drops
+            # are backpressure too (the fan-out layer shed load, §4 / SLO source).
+            from observation.infra import metrics
+
+            metrics.ws_frames_dropped_total.labels(reason="backpressure").inc(gap)
+            self._queue_drop_notice(gap, self._last_cursor)
 
     def _queue_drop_notice(self, dropped: int, resume_cursor: str | None) -> None:
         """Enqueue a ``drop_notice`` frame (channel-layer gap path, WS-11)."""
@@ -517,23 +592,57 @@ class StreamEventsConsumer(AsyncJsonWebsocketConsumer):  # type: ignore[misc]
         gap, for REST gap-fill, INV-DEL-5). Tracks ``delivered`` + the last ``event``
         cursor for the heartbeat counters.
         """
+        from observation.infra import metrics
+
         try:
             while not self._closing:
                 item = await self._queue.get()
                 if self._queue.has_drops():
                     count, resume_cursor = self._queue.drain_drop_notice()
                     self._dropped += count
+                    # df_ws_frames_dropped_total{reason=backpressure}: count exactly
+                    # the oldest frames the queue discarded (INV-DEL-5; SLO/alert
+                    # source). The drop_notice's ``dropped`` is the per-notice gap; the
+                    # heartbeat carries the cumulative ``self._dropped`` total.
+                    metrics.ws_frames_dropped_total.labels(reason="backpressure").inc(count)
                     await self.send_json(
                         build_drop_notice_frame(dropped=count, resume_cursor=resume_cursor)
                     )
+                    metrics.ws_frames_sent_total.inc()
                 await self.send_json(item.frame)
+                metrics.ws_frames_sent_total.inc()
                 if item.frame.get("type") == "event":
                     self._delivered += 1
+                    self._observe_fanout_lag(item.frame, metrics)
                     cur = item.frame.get("cursor")
                     if isinstance(cur, str):
                         self._last_cursor = cur
         except asyncio.CancelledError:
             return
+
+    @staticmethod
+    def _observe_fanout_lag(frame: dict[str, Any], metrics: Any) -> None:
+        """df_ws_fanout_lag_seconds: seconds from canonical ``emitted_at`` to send (§4).
+
+        Best-effort — a frame whose envelope lacks a parseable ``emitted_at`` is
+        skipped (the metric is a latency SLI, never a delivery gate). ``emitted_at``
+        is RFC 3339 UTC with 6 fractional digits (envelope-model timestamps).
+        """
+        event = frame.get("event")
+        if not isinstance(event, dict):
+            return
+        raw = event.get("emitted_at")
+        if not isinstance(raw, str):
+            return
+        from datetime import UTC, datetime
+
+        try:
+            emitted = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return
+        lag = (datetime.now(UTC) - emitted).total_seconds()
+        if lag >= 0:
+            metrics.ws_fanout_lag_seconds.observe(lag)
 
     async def _heartbeat_loop(self) -> None:
         """Send a ``heartbeat`` every 15 s + enforce the 90 s silence close (WS-12).
@@ -606,11 +715,32 @@ class StreamEventsConsumer(AsyncJsonWebsocketConsumer):  # type: ignore[misc]
         if self._closing:
             return
         self._closing = True
+        # SLO-3 source: a close BEFORE the socket reached ``accepted`` is a connect
+        # outcome (auth_failed/quota_rejected/timeout/error per §4); record it once.
+        # A close after accept (silence/revocation) carries no connect outcome — the
+        # ``accepted`` count already landed at auth.
+        if not self._connect_recorded:
+            from observation.infra import metrics
+
+            metrics.ws_connect_total.labels(result=_connect_result_for_close(code)).inc()
+            self._connect_recorded = True
         await self.close(code=code)
 
     async def _teardown(self) -> None:
         """Cancel background tasks, leave the group, release the quota slot."""
         self._closing = True
+        # Observability (§4 ws family): release the active-connection slot exactly
+        # once and observe the connection lifetime. Runs before group/slot teardown
+        # so a teardown failure never leaks the gauge.
+        if self._active_counted:
+            from observation.infra import metrics
+
+            metrics.ws_connections_active.dec()
+            metrics.ws_connection_duration_seconds.observe(
+                time.monotonic() - self._connected_at
+            )
+            self._active_counted = False
+        unbind_log_context()
         deadline = getattr(self, "_auth_deadline_task", None)
         if deadline is not None:
             deadline.cancel()
